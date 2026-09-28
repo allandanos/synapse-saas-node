@@ -18,11 +18,13 @@
     "dev": "tsx watch src/main.ts",
     "migrate": "tsx src/cli/migrate.ts",
     "seed": "tsx src/cli/seed.ts",
+    "plans:sync": "tsx src/cli/plans-sync.ts",
     "test": "vitest run",
     "test:db": "SYNAPSE_TEST_DATABASE_URL=${SYNAPSE_TEST_DATABASE_URL:-postgresql://synapse:synapse@localhost:5434/synapse_node_test} vitest run",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "conformance": "cd ../synapse-saas && SYNAPSE_CONFORMANCE_API_URL=${SYNAPSE_CONFORMANCE_API_URL:-http://localhost:8090} uv run pytest tests/conformance -m '' --no-cov -q -p no:cacheprovider",
-    "conformance:m2": "cd ../synapse-saas && SYNAPSE_CONFORMANCE_API_URL=${SYNAPSE_CONFORMANCE_API_URL:-http://localhost:8090} uv run pytest tests/conformance/test_meta_and_health.py tests/conformance/test_problem_documents.py tests/conformance/test_auth.py tests/conformance/test_tenancy.py tests/conformance/test_authorization.py tests/conformance/test_api_keys.py -m '' --no-cov -q -p no:cacheprovider"
+    "conformance:m2": "cd ../synapse-saas && SYNAPSE_CONFORMANCE_API_URL=${SYNAPSE_CONFORMANCE_API_URL:-http://localhost:8090} uv run pytest tests/conformance/test_meta_and_health.py tests/conformance/test_problem_documents.py tests/conformance/test_auth.py tests/conformance/test_tenancy.py tests/conformance/test_authorization.py tests/conformance/test_api_keys.py -m '' --no-cov -q -p no:cacheprovider",
+    "conformance:m3": "cd ../synapse-saas && SYNAPSE_CONFORMANCE_API_URL=${SYNAPSE_CONFORMANCE_API_URL:-http://localhost:8090} uv run pytest tests/conformance/test_meta_and_health.py tests/conformance/test_problem_documents.py tests/conformance/test_auth.py tests/conformance/test_tenancy.py tests/conformance/test_authorization.py tests/conformance/test_api_keys.py tests/conformance/test_subscriptions.py tests/conformance/test_usage_and_entitlements.py -m '' --no-cov -q -p no:cacheprovider"
   },
   "dependencies": {
     "@nestjs/common": "^11.0.0",
@@ -37,6 +39,7 @@
     "pg": "^8.13.0",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1",
+    "yaml": "^2.9.1",
     "zod": "^3.24.0"
   },
   "devDependencies": {

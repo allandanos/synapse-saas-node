@@ -1,3 +1,4 @@
+import { resolve } from "node:path";
 import { z } from "zod";
 
 /**
@@ -28,6 +29,9 @@ const csv = z.preprocess((v) => {
 
 const positiveInt = z.coerce.number().int().positive();
 
+/** The catalog shipped with the port (`config/plans.yaml`, verbatim from the reference); products point SYNAPSE_PLANS_FILE at their own. */
+export const DEFAULT_PLANS_FILE = resolve(__dirname, "..", "..", "config", "plans.yaml");
+
 const schema = z.object({
   SYNAPSE_ENV: z.string().default("development"),
   SYNAPSE_VERSION: z.string().default("0.1.0"),
@@ -38,6 +42,11 @@ const schema = z.object({
   SYNAPSE_WEB_ORIGINS: csv.default([]),
   SYNAPSE_COOKIE_SECURE: bool.optional(),
   SYNAPSE_BILLING_PROVIDER: z.enum(["manual", "stripe", "paddle", "xendit", "paymongo"]).default("manual"),
+  SYNAPSE_BILLING_CURRENCY: z.string().regex(/^[A-Z]{3}$/).default("PHP"),
+  SYNAPSE_PLANS_FILE: z.preprocess(emptyIsUndefined, z.string().default(DEFAULT_PLANS_FILE)),
+  SYNAPSE_AUTO_SYNC_PLANS: bool.default(true),
+  SYNAPSE_DEFAULT_PLAN_KEY: z.string().min(1).default("free"),
+  SYNAPSE_GRACE_ON_PAST_DUE: bool.default(true),
   SYNAPSE_IDENTITY_PROVIDER: z.enum(["local", "keycloak"]).default("local"),
   SYNAPSE_TENANT_ISOLATION: z.enum(["app", "app_and_rls"]).default("app"),
   SYNAPSE_ACCESS_TOKEN_TTL_MINUTES: positiveInt.default(15),

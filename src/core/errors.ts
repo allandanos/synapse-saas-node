@@ -93,6 +93,27 @@ export const SystemRoleImmutableError = define(409, "system_role_immutable");
 // ── API keys ──────────────────────────────────────────────────────────────────
 export const ApiKeyNotFoundError = define(404, "api_key_not_found");
 
+// ── Subscriptions / plans ──────────────────────────────────────────────────────
+export const PlanNotFoundError = define(404, "plan_not_found");
+export const PlanNotPublicError = define(404, "plan_not_found");
+export const CatalogInvalidError = define(400, "plan_catalog_invalid");
+export const SubscriptionNotFoundError = define(404, "subscription_not_found");
+export const SubscriptionStateError = define(409, "invalid_subscription_transition");
+export const TrialNotAllowedError = define(409, "trial_not_allowed");
+
+// ── Entitlements ───────────────────────────────────────────────────────────────
+export const FeatureNotEntitledError = define(403, "feature_not_entitled");
+export const EntitlementNotFoundError = define(404, "entitlement_not_found");
+
+// ── Usage ──────────────────────────────────────────────────────────────────────
+export const UsageLimitExceededError = define(402, "usage_limit_exceeded");
+export const UnknownMetricError = define(422, "unknown_metric");
+
+// ── Billing ────────────────────────────────────────────────────────────────────
+/** A hosted-billing provider cannot change a plan that was never purchased through it. */
+export const CheckoutRequiredError = define(409, "checkout_required");
+export const BillingProviderNotConfiguredError = define(409, "billing_provider_not_configured");
+
 // ── Misc ───────────────────────────────────────────────────────────────────────
 export const NotFoundError = define(404, "not_found");
 export const MethodNotAllowedError = define(405, "method_not_allowed");
@@ -115,6 +136,12 @@ export interface ValidationIssue {
   msg: string;
   type: string;
 }
+
+/**
+ * A semantic 422 raised by a service (the reference's `ValidationFailedError(msg, extras=…)`):
+ * same problem type as a parser failure, but with free-form extras (`kind`, `batch_url`, …).
+ */
+export const InvalidRequestError = define(422, "validation_failed");
 
 /** Request-parsing failures: `422 validation_failed` with the per-field list in `errors`. */
 export class ValidationFailedError extends DomainError {
