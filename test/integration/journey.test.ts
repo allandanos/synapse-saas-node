@@ -1,73 +1,24 @@
-import "reflect-metadata";
-import http from "node:http";
-import type { NestExpressApplication } from "@nestjs/platform-express";
-import { Test } from "@nestjs/testing";
-import { Pool } from "pg";
-import request from "supertest";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { AppModule } from "../../src/app.module";
-import { SystemSeeder } from "../../src/authorization/system-seed";
-import { SETTINGS, type Settings } from "../../src/core/config";
-import { MigrationRunner } from "../../src/core/db/migrations";
-import { PlatformAdminBootstrap } from "../../src/identity/platform-admin.bootstrap";
-import { configureHttp } from "../../src/main";
+import { type Harness, ADMIN_EMAIL, ADMIN_PASSWORD, PASSWORD, register as registerUser, startHarness, stopHarness, TEST_DB, uid } from "./harness";
 
 /**
  * The auth → org → invite → accept → roles → suspend → API-key journey over
- * HTTP against a real Postgres. Needs SYNAPSE_TEST_DATABASE_URL (a scratch
- * database: every table is truncated first); skipped otherwise so `pnpm test`
- * stays green without a database. `pnpm test:db` sets the default.
+ * HTTP against a real Postgres (see `harness.ts`; skipped without
+ * SYNAPSE_TEST_DATABASE_URL). The monetization journey lives in `monetization.test.ts`.
  */
-const TEST_DB = process.env.SYNAPSE_TEST_DATABASE_URL;
-
-// Node >= 19 keeps sockets alive by default; one connection per request keeps the journey deterministic.
-http.globalAgent = new http.Agent({ keepAlive: false });
-const ADMIN_EMAIL = "operator@platform.example.com";
-const ADMIN_PASSWORD = "operator-password-12345";
-const PASSWORD = "conformance-password-12345";
-
-const uid = (): string => Math.random().toString(16).slice(2, 10);
-
-async function truncateAll(pool: Pool): Promise<void> {
-  await pool.query(`DO $$ DECLARE r RECORD; BEGIN
-    FOR r IN (SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename <> 'schema_migrations') LOOP
-      EXECUTE format('TRUNCATE TABLE %I CASCADE', r.tablename);
-    END LOOP; END $$;`);
-}
-
 describe.skipIf(!TEST_DB)("milestone 2 journey (real Postgres)", () => {
-  let app: NestExpressApplication;
-  let pool: Pool;
-  let http: ReturnType<typeof request>;
+  let h: Harness;
+  let http: Harness["http"];
+  let pool: Harness["pool"];
 
   beforeAll(async () => {
-    process.env.SYNAPSE_DATABASE_URL = TEST_DB;
-    process.env.SYNAPSE_BOOTSTRAP_ADMIN_EMAIL = ADMIN_EMAIL;
-    process.env.SYNAPSE_BOOTSTRAP_ADMIN_PASSWORD = ADMIN_PASSWORD;
-    process.env.SYNAPSE_TENANT_ISOLATION = process.env.SYNAPSE_TEST_TENANT_ISOLATION ?? "app";
-    const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
-    app = moduleRef.createNestApplication<NestExpressApplication>({ bodyParser: false });
-    configureHttp(app, app.get<Settings>(SETTINGS));
-    await app.get(MigrationRunner).run();
-    pool = new Pool({ connectionString: TEST_DB, max: 2 });
-    await truncateAll(pool);
-    await app.get(SystemSeeder).seed();
-    await app.get(PlatformAdminBootstrap).run();
-    await app.init();
-    http = request(app.getHttpServer());
+    h = await startHarness();
+    ({ http, pool } = h);
   });
 
-  afterAll(async () => {
-    await pool?.end();
-    await app?.close();
-  });
+  afterAll(() => stopHarness(h));
 
-  async function register(label: string): Promise<{ email: string; access: string; refresh: string; userId: string }> {
-    const email = `${label}-${uid()}@example.com`;
-    const res = await http.post("/v1/auth/register").send({ email, password: PASSWORD, display_name: label });
-    expect(res.status, res.text).toBe(201);
-    return { email, access: res.body.tokens.access_token, refresh: res.body.tokens.refresh_token, userId: res.body.user.id };
-  }
+  const register = (label: string) => registerUser(h, label);
 
   it("runs the whole journey", async () => {
     // ── problem documents + request ids ────────────────────────────────────
