@@ -1,20 +1,18 @@
-import { type ArgumentsHost, Catch, type ExceptionFilter, HttpException, Logger } from "@nestjs/common";
+import { type ArgumentsHost, Catch, type ExceptionFilter, HttpException, Logger, NotFoundException } from "@nestjs/common";
 import type { Request, Response } from "express";
-import { ConflictError, DomainError, type ProblemDocument, ValidationFailedError, BASE_PROBLEM_URI } from "./errors";
+import {
+  BASE_PROBLEM_URI,
+  ConflictError,
+  DomainError,
+  HttpError,
+  MethodNotAllowedError,
+  NotFoundError,
+  type ProblemDocument,
+  ValidationFailedError,
+} from "./errors";
 import { RequestContext } from "./request-context";
+import { RouteTable } from "./route-table";
 import { isBodyParseError } from "./validation";
-
-const TITLE_BY_STATUS: Record<number, string> = {
-  400: "bad_request",
-  401: "unauthorized",
-  403: "forbidden",
-  404: "not_found",
-  405: "method_not_allowed",
-  406: "not_acceptable",
-  413: "payload_too_large",
-  415: "unsupported_media_type",
-  429: "rate_limited",
-};
 
 const PG_UNIQUE_VIOLATION = "23505";
 
@@ -35,7 +33,10 @@ function isUniqueViolation(error: unknown): boolean {
 export class ProblemFilter implements ExceptionFilter {
   private readonly logger = new Logger(ProblemFilter.name);
 
-  constructor(private readonly context: RequestContext) {}
+  constructor(
+    private readonly context: RequestContext,
+    private readonly routes: RouteTable,
+  ) {}
 
   catch(exception: unknown, host: ArgumentsHost): void {
     const http = host.switchToHttp();
@@ -43,12 +44,13 @@ export class ProblemFilter implements ExceptionFilter {
     const response = http.getResponse<Response>();
     const requestId = this.context.requestId() ?? headerValue(request.headers["x-request-id"]);
     const instance = (request.originalUrl ?? request.url ?? "").split("?")[0];
-    const problem = this.toProblem(exception, instance, requestId);
+    const problem = this.toProblem(exception, instance, requestId, request.method);
     if (requestId) response.setHeader("X-Request-Id", requestId);
+    if (problem.status === 405) response.setHeader("Allow", [...this.routes.methodsFor(instance)].filter((m) => m !== "ALL").join(", "));
     response.status(problem.status).json(problem);
   }
 
-  private toProblem(exception: unknown, instance: string, requestId: string | undefined): ProblemDocument {
+  private toProblem(exception: unknown, instance: string, requestId: string | undefined, method: string): ProblemDocument {
     if (exception instanceof DomainError) return exception.toProblem({ instance, requestId });
     if (isBodyParseError(exception)) {
       return new ValidationFailedError([{ loc: ["body"], msg: "JSON decode error", type: "json_invalid" }]).toProblem({ instance, requestId });
@@ -56,18 +58,15 @@ export class ProblemFilter implements ExceptionFilter {
     if (isUniqueViolation(exception)) {
       return new ConflictError("A row with the same unique key already exists").toProblem({ instance, requestId });
     }
+    if (exception instanceof NotFoundException) {
+      // Express answers a known path with the wrong method as a 404; the contract says 405.
+      const allowed = this.routes.methodsFor(instance);
+      const wrongMethod = allowed.size > 0 && !allowed.has("ALL") && !allowed.has(method.toUpperCase());
+      const error = wrongMethod ? new MethodNotAllowedError("Method not allowed") : new NotFoundError("Not found");
+      return error.toProblem({ instance, requestId });
+    }
     if (exception instanceof HttpException) {
-      const status = exception.getStatus();
-      const title = TITLE_BY_STATUS[status] ?? "http_error";
-      const doc: ProblemDocument = {
-        type: `${BASE_PROBLEM_URI}/${title}`,
-        title: title.replace(/_/g, " "),
-        status,
-        detail: status === 404 ? "Not Found" : exception.message,
-        instance,
-      };
-      if (requestId) doc.request_id = requestId;
-      return doc;
+      return new HttpError(exception.getStatus(), exception.message).toProblem({ instance, requestId });
     }
     this.logger.error(`unhandled exception on ${instance}`, exception instanceof Error ? exception.stack : String(exception));
     const doc: ProblemDocument = {

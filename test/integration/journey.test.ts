@@ -82,6 +82,11 @@ describe.skipIf(!TEST_DB)("milestone 2 journey (real Postgres)", () => {
     expect(unknown.body.request_id).toMatch(/^req_[0-9a-f]{16}$/);
     expect(unknown.headers["x-request-id"]).toBe(unknown.body.request_id);
 
+    const wrongMethod = await http.put("/v1/orgs").set("Authorization", "Bearer nope").send({});
+    expect(wrongMethod.status).toBe(405);
+    expect(wrongMethod.body).toMatchObject({ type: "https://synapse-saas.dev/problems/method_not_allowed", title: "method not allowed", instance: "/v1/orgs" });
+    expect(wrongMethod.headers.allow).toBe("GET, POST");
+
     const invalid = await http.post("/v1/auth/register").send({ email: "not-an-email", password: "x" });
     expect(invalid.status).toBe(422);
     expect(invalid.body.title).toBe("validation failed");

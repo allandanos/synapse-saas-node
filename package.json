@@ -22,7 +22,7 @@
     "test:db": "SYNAPSE_TEST_DATABASE_URL=${SYNAPSE_TEST_DATABASE_URL:-postgresql://synapse:synapse@localhost:5434/synapse_node_test} vitest run",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "conformance": "cd ../synapse-saas && SYNAPSE_CONFORMANCE_API_URL=${SYNAPSE_CONFORMANCE_API_URL:-http://localhost:8090} uv run pytest tests/conformance -m '' --no-cov -q -p no:cacheprovider",
-    "conformance:m2": "cd ../synapse-saas && SYNAPSE_CONFORMANCE_API_URL=${SYNAPSE_CONFORMANCE_API_URL:-http://localhost:8090} uv run pytest tests/conformance/test_meta_and_health.py tests/conformance/test_auth.py tests/conformance/test_tenancy.py tests/conformance/test_authorization.py tests/conformance/test_api_keys.py -m '' --no-cov -q -p no:cacheprovider"
+    "conformance:m2": "cd ../synapse-saas && SYNAPSE_CONFORMANCE_API_URL=${SYNAPSE_CONFORMANCE_API_URL:-http://localhost:8090} uv run pytest tests/conformance/test_meta_and_health.py tests/conformance/test_problem_documents.py tests/conformance/test_auth.py tests/conformance/test_tenancy.py tests/conformance/test_authorization.py tests/conformance/test_api_keys.py -m '' --no-cov -q -p no:cacheprovider"
   },
   "dependencies": {
     "@nestjs/common": "^11.0.0",

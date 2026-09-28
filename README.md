@@ -6,7 +6,7 @@ in [`synapse-saas`](../synapse-saas) — see its
 [ADR 0012](../synapse-saas/docs/adr/0012-polyglot-ports-contract-first.md) and
 [porting guide](../synapse-saas/ports/README.md).
 
-**Contract pinned at:** `synapse-saas@820ce2f` (`contracts/` is a snapshot of
+**Contract pinned at:** `synapse-saas@4de2026` (`contracts/` is a snapshot of
 that commit; re-copy when the reference's `contracts/CHANGELOG.md` gains an entry).
 
 ## Status
@@ -14,7 +14,7 @@ that commit; re-copy when the reference's `contracts/CHANGELOG.md` gains an entr
 | Milestone | Scope | State |
 |---|---|---|
 | 1 | pure logic + core + probes/`/v1/meta` | **done** — `/healthz`, `/readyz`, `/v1/meta`, typed settings, problem documents, request context, DB + RLS GUCs, raw-SQL migrations, outbox + audit writers |
-| 2 | identity, tenancy, authorization (RBAC), API keys | **done** — `test_meta_and_health`, `test_auth`, `test_tenancy`, `test_authorization`, `test_api_keys` pass (`test_key_lifecycle` stops at its `POST /v1/usage/consume` step, a milestone 3 route) |
+| 2 | identity, tenancy, authorization (RBAC), API keys | **done** — `test_meta_and_health`, `test_problem_documents`, `test_auth`, `test_tenancy`, `test_authorization`, `test_api_keys` pass (`test_key_lifecycle` stops at its `POST /v1/usage/consume` step, a milestone 3 route) |
 | 3 | subscriptions, entitlements, usage | — |
 | 4 | billing, invoicing, worker | — |
 | 5 | webhooks, files, flags, audit, agents | — |
@@ -115,8 +115,8 @@ cd ../synapse-saas && \
 SYNAPSE_CONFORMANCE_API_URL=http://localhost:8090 \
 SYNAPSE_CONFORMANCE_ADMIN_EMAIL=operator@platform.example.com \
 SYNAPSE_CONFORMANCE_ADMIN_PASSWORD=operator-password-12345 \
-uv run pytest tests/conformance/test_meta_and_health.py tests/conformance/test_auth.py \
-  tests/conformance/test_tenancy.py tests/conformance/test_authorization.py \
+uv run pytest tests/conformance/test_meta_and_health.py tests/conformance/test_problem_documents.py \
+  tests/conformance/test_auth.py tests/conformance/test_tenancy.py tests/conformance/test_authorization.py \
   tests/conformance/test_api_keys.py -m "" --no-cov -q -p no:cacheprovider
 ```
 
@@ -183,19 +183,11 @@ Module graph (acyclic): `Core ← Authorization ← Tenancy ← {Roles, ApiKeys,
 
 ## Where this port deliberately differs from the reference server
 
-Observable behaviour follows the reference; these are the places where a port
-should not reproduce an accident (all outside what `tests/conformance` checks):
-
-- Unknown routes answer an RFC 7807 `not_found` problem (the reference returns
-  FastAPI's bare `{"detail": "Not Found"}`).
-- A duplicate invite email or duplicate custom-role key answers `409 conflict`
-  (the reference surfaces the unique-constraint violation as a 500).
-- The invite response carries the membership's actual `role_keys` (the
-  reference returns `[]` because the relationship is read before the flush).
-- `member.invited` / `member.invite_email` outbox payloads carry the real
-  organization name (the reference's router leaves the default
-  `"your organization"`).
-- Tenant resolution ignores IP-literal hosts (the reference would try `127`
-  as a subdomain slug when addressed by IP).
+The reference adopted this port's milestone-2 findings in `synapse-saas@4de2026`
+(problem documents for unknown routes and wrong methods, `switch-org` 200 in the
+contract, 409 `conflict` for duplicate invites and role keys, invite `role_keys`
+and organization name, IP-literal hosts, `check_function_bodies` in the
+baseline), so observable behaviour is aligned. Remaining differences are
+internal: none known.
 
 Package: `@synapse-saas/server`. Repository: `allandanos/synapse-saas-node`. Licence: Apache-2.0.

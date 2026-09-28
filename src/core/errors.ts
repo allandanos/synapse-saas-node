@@ -95,8 +95,20 @@ export const ApiKeyNotFoundError = define(404, "api_key_not_found");
 
 // ── Misc ───────────────────────────────────────────────────────────────────────
 export const NotFoundError = define(404, "not_found");
+export const MethodNotAllowedError = define(405, "method_not_allowed");
 export const ConflictError = define(409, "conflict");
 export const RateLimitedError = define(429, "rate_limited");
+
+/** Any other framework-raised HTTP error (413, 415, …): `http_error` with the real status. */
+export class HttpError extends DomainError {
+  override readonly status: number;
+  override readonly title = "http_error";
+
+  constructor(status: number, message?: string) {
+    super(message ?? "Request rejected");
+    this.status = status;
+  }
+}
 
 export interface ValidationIssue {
   loc: (string | number)[];

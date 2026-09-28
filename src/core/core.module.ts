@@ -1,4 +1,5 @@
 import { Global, Inject, Module, type OnApplicationShutdown } from "@nestjs/common";
+import { DiscoveryModule } from "@nestjs/core";
 import { Pool, types } from "pg";
 import { AuditWriter } from "./audit";
 import { loadSettings, PG_POOL, SETTINGS, type Settings } from "./config";
@@ -6,6 +7,7 @@ import { Database } from "./db/database";
 import { MigrationRunner } from "./db/migrations";
 import { OutboxWriter } from "./outbox";
 import { RequestContext } from "./request-context";
+import { RouteTable } from "./route-table";
 import { SecurityService } from "./security";
 
 const OID_INT8 = 20;
@@ -24,6 +26,7 @@ export function createPool(settings: Settings): Pool {
 
 @Global()
 @Module({
+  imports: [DiscoveryModule],
   providers: [
     { provide: SETTINGS, useFactory: () => loadSettings() },
     { provide: PG_POOL, inject: [SETTINGS], useFactory: createPool },
@@ -33,8 +36,9 @@ export function createPool(settings: Settings): Pool {
     SecurityService,
     OutboxWriter,
     AuditWriter,
+    RouteTable,
   ],
-  exports: [SETTINGS, PG_POOL, RequestContext, Database, MigrationRunner, SecurityService, OutboxWriter, AuditWriter],
+  exports: [SETTINGS, PG_POOL, RequestContext, Database, MigrationRunner, SecurityService, OutboxWriter, AuditWriter, RouteTable],
 })
 export class CoreModule implements OnApplicationShutdown {
   constructor(@Inject(PG_POOL) private readonly pool: Pool) {}
