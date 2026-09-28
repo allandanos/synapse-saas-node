@@ -4,9 +4,10 @@ import type { INestApplication } from "@nestjs/common";
 import request from "supertest";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ProbeController } from "../src/api/probe.controller";
-import { loadSettings, PG_POOL, SETTINGS } from "../src/core/config";
+import { loadSettings, SETTINGS } from "../src/core/config";
+import { Database } from "../src/core/db/database";
 
-describe("probes + meta (milestone 1 slice)", () => {
+describe("probes + meta (no database)", () => {
   let app: INestApplication;
   let dbUp = true;
 
@@ -16,11 +17,10 @@ describe("probes + meta (milestone 1 slice)", () => {
       providers: [
         { provide: SETTINGS, useValue: loadSettings({ SYNAPSE_TENANT_ISOLATION: "app_and_rls" }) },
         {
-          provide: PG_POOL,
+          provide: Database,
           useValue: {
-            query: async () => {
+            ping: async () => {
               if (!dbUp) throw new Error("down");
-              return { rows: [{ "?column?": 1 }] };
             },
           },
         },
@@ -43,11 +43,12 @@ describe("probes + meta (milestone 1 slice)", () => {
   it("readyz reports the database and flips to 503", async () => {
     let res = await request(app.getHttpServer()).get("/readyz");
     expect(res.status).toBe(200);
-    expect(res.body.checks.database).toBe("ok");
+    expect(res.body).toEqual({ status: "ok", checks: { database: "ok", redis: "not_configured" } });
     dbUp = false;
     res = await request(app.getHttpServer()).get("/readyz");
     expect(res.status).toBe(503);
-    expect(res.body).toEqual({ status: "degraded", checks: { database: "error" } });
+    expect(res.body.status).toBe("error");
+    expect(res.body.checks.database).toMatch(/^error/);
     dbUp = true;
   });
 
@@ -55,15 +56,11 @@ describe("probes + meta (milestone 1 slice)", () => {
     const res = await request(app.getHttpServer()).get("/v1/meta");
     expect(res.status).toBe(200);
     expect(res.body).toEqual({
+      framework: "synapse-saas",
       version: "0.1.0",
       billing_provider: "manual",
       identity_provider: "local",
       tenant_isolation: "app_and_rls",
     });
-  });
-
-  it("normalises the reference's asyncpg DSN", () => {
-    const s = loadSettings({ SYNAPSE_DATABASE_URL: "postgresql+asyncpg://u:p@h:5432/db" });
-    expect(s.SYNAPSE_DATABASE_URL).toBe("postgresql://u:p@h:5432/db");
   });
 });

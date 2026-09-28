@@ -1,40 +1,43 @@
-import { Controller, Get, HttpCode, Inject, Res } from "@nestjs/common";
+import { Controller, Get, Inject, Res } from "@nestjs/common";
 import type { Response } from "express";
-import type { Pool } from "pg";
-import { PG_POOL, SETTINGS, type Settings } from "../core/config";
+import { SETTINGS, type Settings } from "../core/config";
+import { Database } from "../core/db/database";
+import { Public } from "../identity/public.decorator";
 
-/** Milestone 1 slice of the contract: liveness, readiness, discovery. */
+/** Liveness, readiness, discovery — the milestone 1 slice of the contract. */
+@Public()
 @Controller()
 export class ProbeController {
   constructor(
-    @Inject(PG_POOL) private readonly pool: Pick<Pool, "query">,
+    private readonly db: Database,
     @Inject(SETTINGS) private readonly settings: Settings,
   ) {}
 
   @Get("healthz")
-  healthz() {
+  healthz(): { status: string } {
     return { status: "ok" };
   }
 
-  /** 200 only when every dependency answers; 503 otherwise (same body shape as the reference). */
+  /** 200 only when every dependency answers; 503 otherwise, so a readiness probe pulls a broken pod. */
   @Get("readyz")
-  @HttpCode(200)
-  async readyz(@Res({ passthrough: true }) res: Response) {
+  async readyz(@Res({ passthrough: true }) res: Response): Promise<{ status: string; checks: Record<string, string> }> {
     const checks: Record<string, string> = {};
     try {
-      await this.pool.query("SELECT 1");
+      await this.db.ping();
       checks.database = "ok";
-    } catch {
-      checks.database = "error";
+    } catch (error) {
+      checks.database = `error: ${error instanceof Error ? error.message : String(error)}`;
     }
-    const ok = Object.values(checks).every((v) => v === "ok");
+    checks.redis = "not_configured";
+    const ok = Object.values(checks).every((value) => value === "ok" || value === "not_configured");
     res.status(ok ? 200 : 503);
-    return { status: ok ? "ok" : "degraded", checks };
+    return { status: ok ? "ok" : "error", checks };
   }
 
   @Get("v1/meta")
-  meta() {
+  meta(): Record<string, string> {
     return {
+      framework: "synapse-saas",
       version: this.settings.SYNAPSE_VERSION,
       billing_provider: this.settings.SYNAPSE_BILLING_PROVIDER,
       identity_provider: this.settings.SYNAPSE_IDENTITY_PROVIDER,
