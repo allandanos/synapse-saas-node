@@ -1,0 +1,41 @@
+{
+  "name": "@synapse-saas/server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "NestJS implementation of the Synapse SaaS Framework contract v1",
+  "license": "Apache-2.0",
+  "repository": { "type": "git", "url": "https://github.com/allandanos/synapse-saas-node.git" },
+  "type": "commonjs",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/main.js",
+    "dev": "tsx watch src/main.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "conformance": "cd ../synapse-saas && SYNAPSE_CONFORMANCE_API_URL=http://localhost:8080 uv run pytest tests/conformance -m '' --no-cov -q"
+  },
+  "dependencies": {
+    "@nestjs/common": "^11.0.0",
+    "@nestjs/core": "^11.0.0",
+    "@nestjs/platform-express": "^11.0.0",
+    "class-transformer": "^0.5.1",
+    "class-validator": "^0.14.1",
+    "nestjs-cls": "^5.0.0",
+    "pg": "^8.13.0",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.1",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@nestjs/testing": "^11.0.0",
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.0.0",
+    "@types/pg": "^8.11.0",
+    "@types/supertest": "^6.0.2",
+    "supertest": "^7.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}
