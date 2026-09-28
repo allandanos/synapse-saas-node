@@ -4,23 +4,35 @@
   "private": true,
   "description": "NestJS implementation of the Synapse SaaS Framework contract v1",
   "license": "Apache-2.0",
-  "repository": { "type": "git", "url": "https://github.com/allandanos/synapse-saas-node.git" },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/allandanos/synapse-saas-node.git"
+  },
   "type": "commonjs",
-  "engines": { "node": ">=22" },
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "start": "node dist/main.js",
     "dev": "tsx watch src/main.ts",
+    "migrate": "tsx src/cli/migrate.ts",
+    "seed": "tsx src/cli/seed.ts",
     "test": "vitest run",
+    "test:db": "SYNAPSE_TEST_DATABASE_URL=${SYNAPSE_TEST_DATABASE_URL:-postgresql://synapse:synapse@localhost:5434/synapse_node_test} vitest run",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "conformance": "cd ../synapse-saas && SYNAPSE_CONFORMANCE_API_URL=http://localhost:8080 uv run pytest tests/conformance -m '' --no-cov -q"
+    "conformance": "cd ../synapse-saas && SYNAPSE_CONFORMANCE_API_URL=${SYNAPSE_CONFORMANCE_API_URL:-http://localhost:8090} uv run pytest tests/conformance -m '' --no-cov -q -p no:cacheprovider",
+    "conformance:m2": "cd ../synapse-saas && SYNAPSE_CONFORMANCE_API_URL=${SYNAPSE_CONFORMANCE_API_URL:-http://localhost:8090} uv run pytest tests/conformance/test_meta_and_health.py tests/conformance/test_auth.py tests/conformance/test_tenancy.py tests/conformance/test_authorization.py tests/conformance/test_api_keys.py -m '' --no-cov -q -p no:cacheprovider"
   },
   "dependencies": {
     "@nestjs/common": "^11.0.0",
     "@nestjs/core": "^11.0.0",
     "@nestjs/platform-express": "^11.0.0",
+    "@node-rs/argon2": "^2.2.1",
     "class-transformer": "^0.5.1",
     "class-validator": "^0.14.1",
+    "cookie-parser": "^1.4.7",
+    "jsonwebtoken": "^9.0.3",
     "nestjs-cls": "^5.0.0",
     "pg": "^8.13.0",
     "reflect-metadata": "^0.2.2",
@@ -29,13 +41,17 @@
   },
   "devDependencies": {
     "@nestjs/testing": "^11.0.0",
+    "@swc/core": "^1.16.2",
+    "@types/cookie-parser": "^1.4.10",
     "@types/express": "^5.0.0",
+    "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^22.0.0",
     "@types/pg": "^8.11.0",
     "@types/supertest": "^6.0.2",
     "supertest": "^7.0.0",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",
+    "unplugin-swc": "^2.0.0",
     "vitest": "^3.0.0"
   }
 }
