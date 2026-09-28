@@ -1,36 +1,53 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { Inject, Injectable, Logger } from "@nestjs/common";
 import { RolesRepository } from "../authorization/roles.repository";
 import { SYSTEM_ROLE_MEMBER, SYSTEM_ROLE_OWNER } from "../authorization/permissions";
 import { AuditWriter } from "../core/audit";
+import { SETTINGS, type Settings } from "../core/config";
 import { Database, type Tx } from "../core/db/database";
-import { InviteNotFoundError, NotAMemberError, OrganizationNotFoundError, RoleNotFoundError, SlugUnavailableError } from "../core/errors";
+import {
+  InviteNotFoundError,
+  MembershipLimitReachedError,
+  NotAMemberError,
+  OrganizationNotFoundError,
+  RoleNotFoundError,
+  SlugUnavailableError,
+} from "../core/errors";
 import { events } from "../core/events";
 import { isValidSlug, slugify, uniqueSlug } from "../core/ids";
 import { OutboxWriter } from "../core/outbox";
 import { buildPage, type Page, type PageQuery } from "../core/pagination";
 import { generateRefreshToken, sha256Hex } from "../core/security";
+import { EntitlementsService, UPGRADE_URL } from "../entitlements/entitlements.service";
+import { PlansRepository } from "../subscriptions/plans.repository";
+import { SubscriptionsService } from "../subscriptions/subscriptions.service";
+import { UsageService } from "../usage/usage.service";
 import { type MembershipRead, MembershipsRepository, type MembershipRow, toMembershipRead } from "./memberships.repository";
 import { type OrganizationRead, OrganizationsRepository, toOrganizationRead } from "./organizations.repository";
 
 /**
  * Organization lifecycle + membership management. Every mutation writes audit
  * + outbox in the same transaction. Creating an org bootstraps the owner
- * membership with the `owner` system role.
- *
- * Deferred to milestone 3 (subscriptions/usage): the default-plan subscription
- * bootstrap, the `users` seat gauge, and the invite seat limit.
+ * membership with the `owner` system role and a default-plan subscription so
+ * a new tenant is immediately functional; `users` is a gauge (active members
+ * + pending invites) re-set after every membership change and enforced on
+ * invite (402 `usage_limit_exceeded`, metric `users`).
  */
 @Injectable()
 export class TenancyService {
   private readonly logger = new Logger(TenancyService.name);
 
   constructor(
+    @Inject(SETTINGS) private readonly settings: Settings,
     private readonly db: Database,
     private readonly orgs: OrganizationsRepository,
     private readonly members: MembershipsRepository,
     private readonly roles: RolesRepository,
     private readonly audit: AuditWriter,
     private readonly outbox: OutboxWriter,
+    private readonly plans: PlansRepository,
+    private readonly subscriptions: SubscriptionsService,
+    private readonly entitlements: EntitlementsService,
+    private readonly usage: UsageService,
   ) {}
 
   // ── Organizations ───────────────────────────────────────────────────────────
@@ -54,6 +71,7 @@ export class TenancyService {
         status: "active",
         inviteTokenHash: null,
       });
+      await this.syncSeatGauge(tx, org.id);
       await this.attachRole(tx, membershipId, org.id, SYSTEM_ROLE_OWNER);
 
       await this.audit.log(tx, {
@@ -70,6 +88,8 @@ export class TenancyService {
         organizationId: org.id,
         payload: { name: input.name, slug: finalSlug, owner_user_id: input.ownerUserId },
       });
+      // Default-plan subscription so entitlements resolve immediately
+      await this.bootstrapSubscription(tx, org.id);
       this.logger.log(`org created ${org.id} (${finalSlug})`);
       return toOrganizationRead(org);
     });
@@ -133,10 +153,24 @@ export class TenancyService {
     });
   }
 
-  /** Invite by email: the token rides the internal outbox event only, never the response. */
+  /**
+   * Invite by email: the token rides the internal outbox event only, never the
+   * response. The `users` seat limit is enforced inside the same transaction as the insert.
+   */
   inviteMember(input: { organizationId: string; email: string; roleKeys?: string[]; organizationName: string }): Promise<MembershipRead> {
     const roleKeys = input.roleKeys && input.roleKeys.length > 0 ? input.roleKeys : [SYSTEM_ROLE_MEMBER];
     return this.db.transaction(async (tx) => {
+      const seatLimit = (await this.entitlements.effectiveForOrg(tx, input.organizationId)).limitValue("users");
+      const active = await this.members.countByStatus(tx, input.organizationId, "active");
+      const pending = await this.members.countByStatus(tx, input.organizationId, "invited");
+      if (seatLimit !== null && active + pending + 1 > seatLimit) {
+        throw new MembershipLimitReachedError("Seat limit reached for the current plan", {
+          metric: "users",
+          limit: seatLimit,
+          used: active + pending,
+          upgrade_url: UPGRADE_URL,
+        });
+      }
       const token = generateRefreshToken();
       const membershipId = await this.members.insert(tx, {
         organizationId: input.organizationId,
@@ -170,6 +204,7 @@ export class TenancyService {
         organizationId: input.organizationId,
         payload: { email: input.email, invite_token: token, org_name: input.organizationName },
       });
+      await this.syncSeatGauge(tx, input.organizationId);
       return toMembershipRead(await this.mustFindMembership(tx, membershipId));
     });
   }
@@ -201,6 +236,7 @@ export class TenancyService {
         organizationId,
         payload: { email: user.email },
       });
+      await this.syncSeatGauge(tx, organizationId);
       return { organization_id: organizationId, status: "active" };
     });
   }
@@ -221,6 +257,7 @@ export class TenancyService {
       if (Object.keys(diff).length > 0) {
         await this.audit.log(tx, { eventType: events.MEMBER_UPDATED, organizationId, targetType: "membership", targetId: membershipId, diff });
       }
+      if ("status" in diff) await this.syncSeatGauge(tx, organizationId);
       return toMembershipRead(await this.mustFindMembership(tx, membershipId));
     });
   }
@@ -240,10 +277,35 @@ export class TenancyService {
         diff: { email: membership.invited_email ?? membership.user_id },
       });
       await this.members.delete(tx, membershipId);
+      await this.syncSeatGauge(tx, organizationId);
     });
   }
 
   // ── Internals ───────────────────────────────────────────────────────────────
+
+  /** Create the default-plan subscription for a brand-new org (skipped, with a warning, when the catalog is not synced). */
+  private async bootstrapSubscription(tx: Tx, organizationId: string): Promise<void> {
+    const plan = await this.plans.findByKey(tx, this.settings.SYNAPSE_DEFAULT_PLAN_KEY, { includeArchived: true });
+    if (!plan) {
+      this.logger.warn(`default plan '${this.settings.SYNAPSE_DEFAULT_PLAN_KEY}' missing — no subscription bootstrapped for ${organizationId}`);
+      return;
+    }
+    const now = new Date();
+    await this.subscriptions.createSubscription(tx, {
+      organizationId,
+      plan,
+      status: "active",
+      currentPeriodStart: now,
+      currentPeriodEnd: new Date(now.getTime() + 30 * 86_400_000),
+    });
+  }
+
+  /** `users` is a gauge: active members + pending invites, set after every change. */
+  private async syncSeatGauge(tx: Tx, organizationId: string): Promise<void> {
+    const active = await this.members.countByStatus(tx, organizationId, "active");
+    const pending = await this.members.countByStatus(tx, organizationId, "invited");
+    await this.usage.setGauge(tx, organizationId, "users", active + pending);
+  }
 
   private async attachRole(tx: Tx, membershipId: string, organizationId: string, roleKey: string): Promise<void> {
     const role = await this.roles.findByKeyForOrganization(tx, roleKey, organizationId);

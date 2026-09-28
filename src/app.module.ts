@@ -8,10 +8,13 @@ import { ProbeController } from "./api/probe.controller";
 import { AuthorizationModule } from "./authorization/authorization.module";
 import { RolesModule } from "./authorization/roles.module";
 import { CoreModule } from "./core/core.module";
+import { EntitlementsRoutesModule } from "./entitlements/entitlements-routes.module";
 import { ProblemFilter } from "./core/problem.filter";
 import { ProblemValidationPipe } from "./core/validation";
 import { IdentityModule } from "./identity/identity.module";
+import { SubscriptionsRoutesModule } from "./subscriptions/subscriptions-routes.module";
 import { TenancyModule } from "./tenancy/tenancy.module";
+import { UsageRoutesModule } from "./usage/usage-routes.module";
 
 export const REQUEST_ID_HEADER = "X-Request-Id";
 
@@ -44,6 +47,9 @@ export const clsMiddlewareOptions: ClsMiddlewareOptions = {
     RolesModule,
     ApiKeysModule,
     IdentityModule,
+    SubscriptionsRoutesModule,
+    EntitlementsRoutesModule,
+    UsageRoutesModule,
   ],
   controllers: [ProbeController],
   providers: [

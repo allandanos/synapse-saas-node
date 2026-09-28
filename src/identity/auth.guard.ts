@@ -8,6 +8,7 @@ import { AuthenticationError } from "../core/errors";
 import { isUuid } from "../core/ids";
 import { RequestContext } from "../core/request-context";
 import { SecurityService } from "../core/security";
+import { UsageService } from "../usage/usage.service";
 import { IS_PUBLIC } from "./public.decorator";
 import { UsersRepository } from "./users.repository";
 
@@ -27,6 +28,7 @@ export class AuthGuard implements CanActivate {
     private readonly security: SecurityService,
     private readonly users: UsersRepository,
     private readonly apiKeys: ApiKeysService,
+    private readonly usage: UsageService,
   ) {}
 
   async canActivate(execution: ExecutionContext): Promise<boolean> {
@@ -61,6 +63,9 @@ export class AuthGuard implements CanActivate {
       apiKeyScopes: scopes,
       apiKeyCreatorId: key.created_by_user_id,
     });
+    // Every key-authenticated call meters one api_requests unit (best effort,
+    // never blocking): the tenant is bound above, so RLS admits the write.
+    await this.usage.meterApiKeyRequest(key.organization_id);
   }
 
   private async authenticateJwt(token: string): Promise<void> {

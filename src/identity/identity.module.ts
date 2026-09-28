@@ -2,6 +2,7 @@ import { Module } from "@nestjs/common";
 import { APP_GUARD } from "@nestjs/core";
 import { ApiKeysModule } from "../api-keys/api-keys.module";
 import { TenancyModule } from "../tenancy/tenancy.module";
+import { UsageModule } from "../usage/usage.module";
 import { AuthGuard } from "./auth.guard";
 import { IdentityController } from "./identity.controller";
 import { IdentityService } from "./identity.service";
@@ -10,7 +11,7 @@ import { TokensRepository } from "./tokens.repository";
 import { UsersRepository } from "./users.repository";
 
 @Module({
-  imports: [TenancyModule, ApiKeysModule],
+  imports: [TenancyModule, ApiKeysModule, UsageModule],
   controllers: [IdentityController],
   providers: [UsersRepository, TokensRepository, IdentityService, PlatformAdminBootstrap, { provide: APP_GUARD, useClass: AuthGuard }],
   exports: [UsersRepository, IdentityService, PlatformAdminBootstrap],
