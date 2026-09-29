@@ -130,7 +130,8 @@ export class StripeBillingProvider implements BillingProvider {
     return data.map((item) => toInvoiceRef(record(item)));
   }
 
-  verifyWebhook(raw: WebhookRequest): Promise<VerifiedWebhook> {
+  // `async` so a refusal is always a rejected promise, never a synchronous throw.
+  async verifyWebhook(raw: WebhookRequest): Promise<VerifiedWebhook> {
     const { timestamp, signature } = parseStripeSignature(raw.headers["stripe-signature"] ?? "");
     if (timestamp === null || signature === null) throw new WebhookSignatureInvalidError("Malformed Stripe-Signature header");
     if (Math.abs(Date.now() / 1000 - timestamp) > WEBHOOK_TOLERANCE_SECONDS) {
@@ -140,12 +141,12 @@ export class StripeBillingProvider implements BillingProvider {
       throw new WebhookSignatureInvalidError("Stripe webhook signature mismatch");
     }
     const parsed = parseJsonBody(raw.body, "Stripe");
-    return Promise.resolve({
+    return {
       providerEventId: String(parsed.id ?? ""),
       eventType: String(parsed.type ?? ""),
       parsed,
       receivedAt: new Date(),
-    });
+    };
   }
 
   translateWebhook(verified: VerifiedWebhook): NormalizedBillingEvent[] {

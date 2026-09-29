@@ -111,18 +111,19 @@ export class XenditBillingProvider implements BillingProvider {
     return data.map((item) => this.toInvoiceRef(record(item)));
   }
 
-  verifyWebhook(raw: WebhookRequest): Promise<VerifiedWebhook> {
+  // `async` so a refusal is always a rejected promise, never a synchronous throw.
+  async verifyWebhook(raw: WebhookRequest): Promise<VerifiedWebhook> {
     const supplied = raw.headers["x-callback-token"] ?? "";
     if (!this.webhookToken || !constantTimeEquals(supplied, this.webhookToken)) {
       throw new WebhookSignatureInvalidError("Missing or invalid X-Callback-Token");
     }
     const parsed = parseJsonBody(raw.body, "Xendit");
-    return Promise.resolve({
+    return {
       providerEventId: String(parsed.id ?? `xendit_${randomBytes(8).toString("hex")}`),
       eventType: String(parsed.status ?? ""),
       parsed,
       receivedAt: new Date(),
-    });
+    };
   }
 
   translateWebhook(verified: VerifiedWebhook): NormalizedBillingEvent[] {

@@ -108,7 +108,8 @@ export class PayMongoBillingProvider implements BillingProvider {
     return Promise.resolve([]); // PayMongo surfaces payments, not invoices; we record locally
   }
 
-  verifyWebhook(raw: WebhookRequest): Promise<VerifiedWebhook> {
+  // `async` so a refusal is always a rejected promise, never a synchronous throw.
+  async verifyWebhook(raw: WebhookRequest): Promise<VerifiedWebhook> {
     const header = raw.headers["paymongo-signature"] ?? "";
     let timestamp: number | null = null;
     let signature: string | null = null;
@@ -131,12 +132,12 @@ export class PayMongoBillingProvider implements BillingProvider {
     }
     const parsed = parseJsonBody(raw.body, "PayMongo");
     const attributes = record(record(parsed.data).attributes);
-    return Promise.resolve({
+    return {
       providerEventId: String(parsed.id ?? `paymongo_${randomBytes(8).toString("hex")}`),
       eventType: String(parsed.type ?? attributes.type ?? ""),
       parsed,
       receivedAt: new Date(),
-    });
+    };
   }
 
   translateWebhook(verified: VerifiedWebhook): NormalizedBillingEvent[] {

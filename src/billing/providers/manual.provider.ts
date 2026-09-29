@@ -89,18 +89,19 @@ export class ManualBillingProvider implements BillingProvider {
     return Promise.resolve([]); // manual invoices live in our database only
   }
 
-  verifyWebhook(raw: WebhookRequest): Promise<VerifiedWebhook> {
+  // `async` so a refusal is always a rejected promise, never a synchronous throw.
+  async verifyWebhook(raw: WebhookRequest): Promise<VerifiedWebhook> {
     const supplied = raw.headers[MANUAL_TOKEN_HEADER] ?? "";
     if (!this.webhookToken || !constantTimeEquals(supplied, this.webhookToken)) {
       throw new WebhookSignatureInvalidError("Missing or invalid manual webhook token");
     }
     const parsed = parseJsonBody(raw.body, "manual");
-    return Promise.resolve({
+    return {
       providerEventId: String(parsed.id ?? token("manual")),
       eventType: String(parsed.type ?? "manual.event"),
       parsed,
       receivedAt: new Date(),
-    });
+    };
   }
 
   translateWebhook(verified: VerifiedWebhook): NormalizedBillingEvent[] {

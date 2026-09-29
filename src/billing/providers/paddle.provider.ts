@@ -106,7 +106,8 @@ export class PaddleBillingProvider implements BillingProvider {
     return Promise.resolve([]);
   }
 
-  verifyWebhook(raw: WebhookRequest): Promise<VerifiedWebhook> {
+  // `async` so a refusal is always a rejected promise, never a synchronous throw.
+  async verifyWebhook(raw: WebhookRequest): Promise<VerifiedWebhook> {
     const parsed = parseJsonBody(raw.body, "Paddle");
     const header = raw.headers["paddle-signature"] ?? "";
     // Semicolon-separated per the spec; a comma is tolerated for proxies that rewrite it.
@@ -124,12 +125,12 @@ export class PaddleBillingProvider implements BillingProvider {
         throw new WebhookSignatureInvalidError("Paddle webhook timestamp outside tolerance");
       }
       if (constantTimeEquals(signPayloadColon(raw.body, this.webhookSecret, timestamp), h1)) {
-        return Promise.resolve({
+        return {
           providerEventId: String(parsed.event_id ?? `paddle_${randomBytes(8).toString("hex")}`),
           eventType: String(parsed.event_type ?? ""),
           parsed,
           receivedAt: new Date(),
-        });
+        };
       }
     }
     if (!this.webhookSecret) throw new WebhookSignatureInvalidError("Paddle webhook secret not configured");
