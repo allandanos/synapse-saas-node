@@ -7,6 +7,8 @@ import { AUDIENCE_PUBLIC, events } from "../core/events";
 import { uuidV7 } from "../core/ids";
 import { EntitlementsService } from "../entitlements/entitlements.service";
 import { NotificationHandlers } from "../notifications/handlers";
+import { FilesRepository } from "../storage/files.repository";
+import { UsageService } from "../usage/usage.service";
 import { intervalMs } from "../subscriptions/subscriptions.service";
 import { SubscriptionsRepository } from "../subscriptions/subscriptions.repository";
 import { WebhookDeliveriesRepository } from "../webhooks/deliveries.repository";
@@ -63,6 +65,8 @@ export class JobsService {
     private readonly invoicing: InvoicingService,
     private readonly entitlements: EntitlementsService,
     private readonly notifications: NotificationHandlers,
+    private readonly usage: UsageService,
+    private readonly files: FilesRepository,
   ) {}
 
   /** Run one job by name (`jobs run-once`, tests, a scheduler-triggered container). */
@@ -330,6 +334,14 @@ export class JobsService {
           ]);
           await purge(`DELETE FROM outbox_events WHERE published_at IS NOT NULL AND published_at < now() - make_interval(days => $1)`, [OUTBOX_RETENTION_DAYS]);
           await purge(`DELETE FROM audit_logs WHERE created_at < now() - make_interval(days => $1)`, [this.settings.SYNAPSE_AUDIT_RETENTION_DAYS]);
+          // Presigned uploads that never completed: the PUT URL has long
+          // expired, so soft-delete the index row and give the reserved bytes
+          // back — otherwise a client that walked away bills the tenant forever.
+          const stale = await this.files.releaseStalePending(tx, this.settings.SYNAPSE_STORAGE_PRESIGN_SECONDS * 2);
+          for (const row of stale) {
+            await this.usage.adjustGauge(tx, row.organization_id, "storage_bytes", -Number(row.size_bytes), false);
+          }
+          purged += stale.length;
           await purge(`DELETE FROM usage_idempotency_keys WHERE created_at < now() - make_interval(days => $1)`, [IDEMPOTENCY_RETENTION_DAYS]);
           return purged;
         }),

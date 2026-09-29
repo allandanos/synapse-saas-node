@@ -68,6 +68,16 @@ const schema = z.object({
   SYNAPSE_SMTP_USERNAME: str(""),
   SYNAPSE_SMTP_PASSWORD: str(""),
   SYNAPSE_SMTP_TLS: z.enum(["none", "starttls", "ssl"]).default("none"),
+  // ── Storage ──────────────────────────────────────────────────────────────
+  // A bucket selects the S3-compatible backend (AWS, R2, MinIO); unset means
+  // local disk under SYNAPSE_STORAGE_ROOT, which has no presigned URLs.
+  SYNAPSE_S3_BUCKET: str(""),
+  SYNAPSE_S3_ENDPOINT_URL: str(""),
+  SYNAPSE_S3_REGION: str("us-east-1"),
+  SYNAPSE_S3_ACCESS_KEY_ID: str(""),
+  SYNAPSE_S3_SECRET_ACCESS_KEY: str(""),
+  SYNAPSE_STORAGE_ROOT: str(".storage"),
+  SYNAPSE_STORAGE_PRESIGN_SECONDS: positiveInt.default(3600),
   /** Background jobs run in-process with the API (`pnpm worker` runs them alone). */
   SYNAPSE_WORKER_ENABLED: bool.default(true),
   SYNAPSE_AUDIT_RETENTION_DAYS: positiveInt.default(365),

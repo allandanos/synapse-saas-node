@@ -3,7 +3,9 @@ import { ScheduleModule } from "@nestjs/schedule";
 import { BillingModule } from "../billing/billing.module";
 import { EntitlementsModule } from "../entitlements/entitlements.module";
 import { NotificationsModule } from "../notifications/notifications.module";
+import { FilesRepository } from "../storage/files.repository";
 import { SubscriptionsModule } from "../subscriptions/subscriptions.module";
+import { UsageModule } from "../usage/usage.module";
 import { WebhooksModule } from "../webhooks/webhooks.module";
 import { AdvisoryLock } from "./advisory-lock";
 import { JobsService } from "./jobs.service";
@@ -17,8 +19,8 @@ import { WorkerScheduler } from "./worker.scheduler";
  * once each.
  */
 @Module({
-  imports: [ScheduleModule.forRoot(), BillingModule, SubscriptionsModule, EntitlementsModule, WebhooksModule, NotificationsModule],
-  providers: [AdvisoryLock, OutboxRepository, JobsService, WorkerScheduler],
+  imports: [ScheduleModule.forRoot(), BillingModule, SubscriptionsModule, EntitlementsModule, WebhooksModule, NotificationsModule, UsageModule],
+  providers: [AdvisoryLock, OutboxRepository, FilesRepository, JobsService, WorkerScheduler],
   exports: [JobsService],
 })
 export class WorkerModule {}

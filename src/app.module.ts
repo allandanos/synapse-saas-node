@@ -16,6 +16,7 @@ import { FeatureFlagsModule } from "./feature-flags/feature-flags.module";
 import { ProblemFilter } from "./core/problem.filter";
 import { ProblemValidationPipe } from "./core/validation";
 import { IdentityModule } from "./identity/identity.module";
+import { StorageModule } from "./storage/storage.module";
 import { SubscriptionsRoutesModule } from "./subscriptions/subscriptions-routes.module";
 import { TenancyModule } from "./tenancy/tenancy.module";
 import { UsageRoutesModule } from "./usage/usage-routes.module";
@@ -61,6 +62,7 @@ export const clsMiddlewareOptions: ClsMiddlewareOptions = {
     AuditRoutesModule,
     FeatureFlagsModule,
     WebhooksRoutesModule,
+    StorageModule,
     WorkerModule,
   ],
   controllers: [ProbeController],
