@@ -75,8 +75,12 @@ export class WebhookEndpointsRepository {
     return row as WebhookEndpointFullRow;
   }
 
+  /** Deterministic order (`created_at` desc, id): the route pages this in memory. */
   listForOrg(tx: Tx, organizationId: string): Promise<WebhookEndpointFullRow[]> {
-    return tx.rows<WebhookEndpointFullRow>(`SELECT ${COLUMNS} FROM webhook_endpoints WHERE organization_id = $1 ORDER BY created_at`, [organizationId]);
+    return tx.rows<WebhookEndpointFullRow>(
+      `SELECT ${COLUMNS} FROM webhook_endpoints WHERE organization_id = $1 ORDER BY created_at DESC, id`,
+      [organizationId],
+    );
   }
 
   findScoped(tx: Tx, id: string, organizationId: string): Promise<WebhookEndpointFullRow | undefined> {

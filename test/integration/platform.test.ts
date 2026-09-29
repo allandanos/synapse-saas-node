@@ -62,7 +62,29 @@ maybe("platform journeys (webhooks, files, flags, audit, agents)", () => {
       expect(listed.body[0].secret).toBeUndefined();
       expect(listed.body[0].url).toBe("https://hooks.example.com/secret-once");
 
+      const auditCreated = await h.http.get("/v1/audit").set(tenant.headers).query({ event_type: "webhook.endpoint_created" });
+      expect(auditCreated.body.data.map((r: { target_id: string }) => r.target_id)).toEqual([created.body.id]);
+      expect(auditCreated.body.data[0]).toMatchObject({ target_type: "webhook_endpoint" });
+      expect(auditCreated.body.data[0].diff).toEqual({
+        endpoint_id: created.body.id,
+        url: "https://hooks.example.com/secret-once",
+        events: ["member.invited"],
+      });
+      // The secret must not reach the outbox payload or the audit diff.
+      expect(JSON.stringify(auditCreated.body)).not.toContain(created.body.secret);
+      const emitted = await h.pool.query<{ event_type: string; payload: Record<string, unknown> }>(
+        "SELECT event_type, payload FROM outbox_events WHERE aggregate_id = $1",
+        [created.body.id],
+      );
+      expect(emitted.rows.map((r) => r.event_type)).toEqual(["webhook.endpoint_created"]);
+      expect(JSON.stringify(emitted.rows[0]?.payload)).not.toContain(created.body.secret);
+
       await h.http.delete(`/v1/webhooks/endpoints/${created.body.id}`).set(tenant.headers).expect(204);
+      const auditDeleted = await h.http.get("/v1/audit").set(tenant.headers).query({ event_type: "webhook.endpoint_deleted" });
+      expect(auditDeleted.body.data.map((r: { target_id: string }) => r.target_id)).toEqual([created.body.id]);
+      // The endpoint row is gone but its history is not.
+      const after = await h.pool.query("SELECT event_type FROM outbox_events WHERE aggregate_id = $1", [created.body.id]);
+      expect(after.rowCount).toBe(2);
     });
 
     it("refuses a url pydantic's HttpUrl would refuse", async () => {
@@ -124,6 +146,25 @@ maybe("platform journeys (webhooks, files, flags, audit, agents)", () => {
       expect(cascaded.rowCount).toBe(0);
     });
 
+    it("orders the endpoint list newest first so pages never repeat a row", async () => {
+      const lister = await makeTenant(h, "hook-order");
+      const ids: string[] = [];
+      for (let i = 0; i < 3; i += 1) {
+        const made = await h.http.post("/v1/webhooks/endpoints").set(lister.headers).send({ url: `https://hooks.example.com/n${String(i)}`, events: [] });
+        expect(made.status, made.text).toBe(201);
+        ids.push(made.body.id);
+      }
+      const listed = await h.http.get("/v1/webhooks/endpoints").set(lister.headers);
+      expect(listed.headers["x-total-count"]).toBe("3");
+      const order = listed.body.map((e: { id: string }) => e.id);
+      // `created_at` desc, id — the same rows and the same order every time.
+      expect(new Set(order)).toEqual(new Set(ids));
+      expect((await h.http.get("/v1/webhooks/endpoints").set(lister.headers)).body.map((e: { id: string }) => e.id)).toEqual(order);
+      const firstPage = await h.http.get("/v1/webhooks/endpoints").set(lister.headers).query({ limit: 2, offset: 0 });
+      const secondPage = await h.http.get("/v1/webhooks/endpoints").set(lister.headers).query({ limit: 2, offset: 2 });
+      expect([...firstPage.body, ...secondPage.body].map((e: { id: string }) => e.id)).toEqual(order);
+    });
+
     it("is invisible across tenants", async () => {
       const mine = await h.http.post("/v1/webhooks/endpoints").set(tenant.headers).send({ url: "https://hooks.example.com/mine", events: [] });
       const stranger = await makeTenant(h, "stranger");
@@ -154,8 +195,20 @@ maybe("platform journeys (webhooks, files, flags, audit, agents)", () => {
       expect(downloaded.headers["content-type"]).toContain("text/plain");
       expect(downloaded.headers["content-disposition"]).toBe('attachment; filename="a.txt"');
 
+      const auditUploaded = await h.http.get("/v1/audit").set(files.headers).query({ event_type: "file.uploaded" });
+      expect(auditUploaded.body.data.map((r: { target_id: string }) => r.target_id)).toEqual([uploaded.body.id]);
+      expect(auditUploaded.body.data[0]).toMatchObject({ target_type: "file" });
+      expect(auditUploaded.body.data[0].diff).toEqual({ file_id: uploaded.body.id, name: "a.txt", content_type: "text/plain", size_bytes: 5 });
+
       expect(await storageUsed(files)).toBe(5);
       await h.http.delete(`/v1/files/${uploaded.body.id}`).set(files.headers).expect(204);
+      const auditDeleted = await h.http.get("/v1/audit").set(files.headers).query({ event_type: "file.deleted" });
+      expect(auditDeleted.body.data.map((r: { target_id: string }) => r.target_id)).toEqual([uploaded.body.id]);
+      const emitted = await h.pool.query<{ event_type: string }>("SELECT event_type FROM outbox_events WHERE aggregate_id = $1 ORDER BY created_at", [
+        uploaded.body.id,
+      ]);
+      expect(emitted.rows.map((r) => r.event_type)).toEqual(["file.uploaded", "file.deleted"]);
+
       expect(await storageUsed(files)).toBe(0);
       expect((await h.http.get(`/v1/files/${uploaded.body.id}`).set(files.headers)).status).toBe(404);
       expect((await h.http.get("/v1/files").set(files.headers)).body).toEqual([]);
@@ -171,6 +224,8 @@ maybe("platform journeys (webhooks, files, flags, audit, agents)", () => {
       // Nothing was indexed and the level did not move.
       expect((await h.http.get("/v1/files").set(files.headers)).body).toEqual([]);
       expect(await storageUsed(files)).toBe(FREE_STORAGE_LIMIT);
+      // No row, so no event and no audit trail either.
+      expect((await h.http.get("/v1/audit").set(files.headers).query({ event_type: "file.uploaded" })).body.data).toEqual([]);
     });
 
     it("refuses both presign directions with direct_upload_limit_bytes on the upload one", async () => {
@@ -279,6 +334,15 @@ maybe("platform journeys (webhooks, files, flags, audit, agents)", () => {
 
       const scopeless = await h.http.post(`/v1/feature-flags/${key}/overrides`).set(platform).send({ enabled: true });
       expect(scopeless.status).toBe(422);
+
+      // Exactly one scope: both used to be stored silently as a user override.
+      const bothScopes = await h.http
+        .post(`/v1/feature-flags/${key}/overrides`)
+        .set(platform)
+        .send({ organization_id: tenant.orgId, user_id: tenant.userId, enabled: true });
+      expect(bothScopes.status, bothScopes.text).toBe(422);
+      expect(bothScopes.body.type).toContain("validation_failed");
+      expect((await h.http.get(`/v1/feature-flags/${key}/overrides`).set(platform)).body).toEqual([]);
     });
 
     it("keeps a percentage rollout deterministic for the same identity", async () => {

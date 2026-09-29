@@ -6,7 +6,7 @@ in [`synapse-saas`](../synapse-saas) — see its
 [ADR 0012](../synapse-saas/docs/adr/0012-polyglot-ports-contract-first.md) and
 [porting guide](../synapse-saas/ports/README.md).
 
-**Contract pinned at:** `synapse-saas@cd55a53` (`contracts/` is a snapshot of
+**Contract pinned at:** `synapse-saas@6272ab3` (`contracts/` is a snapshot of
 that commit; re-copy when the reference's `contracts/CHANGELOG.md` gains an entry).
 
 ## Status
@@ -170,7 +170,11 @@ SigV4 presigning; the local-disk backend needs neither) · Vitest + supertest.
   hostnames): the normalised `href` that gets stored is exactly what
   pydantic's `str(HttpUrl)` yields. Endpoint and delivery ids are org-scoped,
   so a foreign one is a 404, and retry returns any delivery to `pending` with
-  its attempts cleared and due now.
+  its attempts cleared and due now. Creating and deleting an endpoint emit the
+  catalogued `webhook.endpoint_created` / `webhook.endpoint_deleted` plus an
+  audit row (`target_type: webhook_endpoint`) in the same transaction, carrying
+  `{endpoint_id, url, events}` — never the secret, which would otherwise travel
+  to every other endpoint of the org and sit in the audit log forever.
 - **Files: quota first, then bytes, then the row.** `storage_bytes` is a
   LEVEL, so `POST /v1/files` reserves capacity before a single byte is
   written (402 with `upgrade_url` on a breach), writes the object, then
@@ -185,11 +189,18 @@ SigV4 presigning; the local-disk backend needs neither) · Vitest + supertest.
   releases the reservation and soft-deletes in a transaction that **commits
   before** the 409 — so a tenant is never billed for bytes that never arrived
   — and `purge_expired` does the same for uploads that were simply abandoned.
+  A file becoming ready (direct upload, or the `pending → ready` transition of
+  a presigned one, once) emits `file.uploaded` and deleting it emits
+  `file.deleted`, each with an audit row (`target_type: file`) carrying
+  `{file_id, name, content_type, size_bytes}` in the same transaction as the
+  index change — so a tenant never sees an event for a file the database does
+  not have, and retention (not a tenant action) emits neither.
 - **Flags are not entitlements.** Entitlements answer "what did this org pay
   for?" (`@RequireFeature` + `FeatureGuard`, 403 with upgrade hints); flags
   answer "is this code path on yet?" (`@RequireFlag` + `FeatureFlagGuard`,
   403 carrying the flag key). Resolution is user override → org override →
-  global default, an unknown or archived flag is off, and percentage rollouts
+  global default — an override carries **exactly one** scope, so neither and
+  both are 422 — an unknown or archived flag is off, and percentage rollouts
   bucket deterministically: the first four bytes of `sha256("{flag}:{id}")`
   big-endian, modulo 10 000, in when below `BUCKETS * pct // 100`. Defining
   flags and overriding them for somebody else is an operator action (ADR
@@ -333,14 +344,20 @@ local-disk backend; the S3 path is covered by `pnpm test:db`).
   produced by a real `member.invited` → filter → retry → delete cascading its
   deliveries; file upload → list → download bytes → gauge up → delete → gauge
   down, the 402 before a byte is written, both presign 409s and the
-  `storage_error` family; flag override layering, upsert, duplicate/unknown/
-  scope-less rejections and rollout determinism; the audit page with filters
+  `storage_error` family; the `file.uploaded`/`file.deleted` and
+  `webhook.endpoint_created`/`_deleted` events and audit rows, with the secret
+  absent from both the payload and the diff, and the endpoint list's stable
+  `created_at` desc order across pages; flag override layering, upsert,
+  duplicate/unknown/neither-and-both-scope rejections and rollout
+  determinism; the audit page with filters
   and API-key attribution; the agent gate → grant → CRUD → slug-reuse 409 with
   the exact event and audit vocabulary each mutation leaves) and
   `storage-s3.test.ts` (the presigned half against `StubS3Server`, an S3-shaped
   object store over plain HTTP: reserve → presign → PUT → complete → ready,
   complete without a PUT answering 409 with the reservation released, a size
-  mismatch, and `purge_expired` reclaiming an abandoned upload) against
+  mismatch, `file.uploaded` firing on the transition and not on the idempotent
+  re-complete, and `purge_expired` reclaiming an abandoned upload without
+  emitting anything) against
   `SYNAPSE_TEST_DATABASE_URL`
   (default `postgresql://synapse:synapse@localhost:5434/synapse_node_test`).
   Every table of that database is truncated first — never point it at data you
@@ -458,7 +475,7 @@ baseline), so observable behaviour is aligned. Remaining differences are
 internal: entitlements and feature flags are not cached (resolved per request,
 with the reference's invalidation points marked).
 
-Three places where this port is deliberately *stricter* than the reference, all
+Two places where this port is deliberately *stricter* than the reference, both
 invisible to the contract:
 
 - **Xendit amounts.** The reference does `int(float(amount) * 100)`
@@ -467,33 +484,23 @@ invisible to the contract:
   says money is integer minor units end to end.
 - **`verifyWebhook` always rejects through a promise** rather than throwing
   synchronously, so a caller cannot miss a refusal by forgetting to await.
-- **`GET /v1/webhooks/endpoints` orders by `created_at`.** The reference's
-  `WebhookService.list_endpoints` (`webhooks/service.py:81`) has no `ORDER BY`,
-  so the rows it hands to `paginate_in_memory` arrive in whatever order
-  Postgres returns — pages can repeat or skip an endpoint. The order is
-  unspecified by the contract, so imposing one breaks nothing.
 
-Three things the contract and the reference server disagree about, left as the
-reference has them and reported upstream rather than "fixed" here (ADR 0012):
+This port's milestone-5 findings were adopted by the reference in
+`synapse-saas@6272ab3`, and the conformance suite now asserts them, so the
+three disagreements it turned up are closed rather than carried:
 
-- **`contracts/events.json` advertises five events nothing emits.**
-  `file.uploaded`, `file.deleted`, `webhook.endpoint_created`,
-  `webhook.endpoint_updated` and `webhook.endpoint_deleted` are in the public
-  catalog and defined in `core/events.py:55-56,64-66`, but `storage/router.py`
-  and `webhooks/service.py` contain no `append_outbox` call — a tenant
-  subscribing to them receives nothing. Neither do those two routers write
-  audit rows, so uploading or deleting a file and creating or deleting a
-  webhook endpoint leave no trail on `GET /v1/audit`. This port matches the
-  server, not the catalog.
-- **A flag override may carry both scopes, and the org half is then ignored.**
-  `OverrideCreate._require_scope` (`feature_flags/schemas.py:42`) only rejects
-  an override with *neither* `organization_id` nor `user_id`; with both,
-  `FeatureFlagService._override` (`service.py:211`) matches on `user_id`
-  alone, so the row is written and read back as a user override while its
-  `organization_id` column says otherwise.
-- **`set_override` answers 404 `feature_flag_not_found` for a missing scope**
-  (`service.py:151`) — a validation problem wearing a not-found title. The
-  route can never reach it (the schema rejects first with 422), so the port
-  keeps both behaviours exactly where the reference puts them.
+- `file.uploaded`, `file.deleted`, `webhook.endpoint_created` and
+  `webhook.endpoint_deleted` were in the public event catalog with no producer,
+  and the matching routes left no audit rows. Both servers now emit the event
+  **and** the audit row in the same transaction as the row change.
+  `webhook.endpoint_updated` is gone from the catalog: no route updates an
+  endpoint.
+- `POST /v1/feature-flags/{key}/overrides` requires **exactly one** scope.
+  Both `organization_id` and `user_id` used to be stored silently as a user
+  override whose `organization_id` column said otherwise; it is now 422.
+  (The reference also swapped the service-level guard's 404
+  `feature_flag_not_found` for a 422 — the same title this port raises.)
+- `GET /v1/webhooks/endpoints` is ordered (`created_at` desc, id), so the
+  in-memory paging can no longer repeat or skip a row.
 
 Package: `@synapse-saas/server`. Repository: `allandanos/synapse-saas-node`. Licence: Apache-2.0.

@@ -64,10 +64,16 @@ maybe("file storage on an S3-compatible backend", () => {
     expect(completed.status, completed.text).toBe(200);
     expect(completed.body).toMatchObject({ status: "ready", size_bytes: body.length });
 
-    // Idempotent: completing a ready file answers the same row.
+    // `file.uploaded` fires on the pending -> ready transition, not on the
+    // presign, and the idempotent re-complete must not fire it a second time.
+    const audited = await h.http.get("/v1/audit").set(tenant.headers).query({ event_type: "file.uploaded" });
+    expect(audited.body.data.map((r: { target_id: string }) => r.target_id)).toEqual([presigned.body.id]);
+    expect(audited.body.data[0].diff).toEqual({ file_id: presigned.body.id, name: "big.bin", content_type: "application/octet-stream", size_bytes: body.length });
+
     const again = await h.http.post(`/v1/files/${presigned.body.id}/complete`).set(tenant.headers);
     expect(again.status).toBe(200);
     expect(again.body.id).toBe(presigned.body.id);
+    expect((await h.http.get("/v1/audit").set(tenant.headers).query({ event_type: "file.uploaded" })).body.data).toHaveLength(1);
 
     const listed = await h.http.get("/v1/files").set(tenant.headers);
     expect(listed.body.map((f: { id: string }) => f.id)).toEqual([presigned.body.id]);
@@ -84,6 +90,10 @@ maybe("file storage on an S3-compatible backend", () => {
     await h.http.delete(`/v1/files/${presigned.body.id}`).set(tenant.headers).expect(204);
     expect(stub.objects.has(`${tenant.orgId}/big.bin`)).toBe(false);
     expect(await storageUsed()).toBe(0);
+    const emitted = await h.pool.query<{ event_type: string }>("SELECT event_type FROM outbox_events WHERE aggregate_id = $1 ORDER BY created_at", [
+      presigned.body.id,
+    ]);
+    expect(emitted.rows.map((r) => r.event_type)).toEqual(["file.uploaded", "file.deleted"]);
   });
 
   it("releases the reservation when the bytes never arrive — and the 409 does not roll it back", async () => {
@@ -103,6 +113,9 @@ maybe("file storage on an S3-compatible backend", () => {
     // The release committed despite the error, and the pending row is gone.
     expect(await storageUsed()).toBe(before);
     expect((await h.http.post(`/v1/files/${presigned.body.id}/complete`).set(tenant.headers)).status).toBe(404);
+    // Nothing became ready, so no `file.uploaded` for this id.
+    const emitted = await h.pool.query("SELECT 1 FROM outbox_events WHERE aggregate_id = $1", [presigned.body.id]);
+    expect(emitted.rowCount).toBe(0);
   });
 
   it("rejects a completed upload whose size does not match the reservation", async () => {
@@ -139,6 +152,10 @@ maybe("file storage on an S3-compatible backend", () => {
     expect(await storageUsed()).toBe(before);
     const row = await h.pool.query<{ deleted_at: Date | null }>("SELECT deleted_at FROM stored_files WHERE id = $1", [presigned.body.id]);
     expect(row.rows[0]?.deleted_at).not.toBeNull();
+    // Retention is not a tenant action: the reference's `purge_expired` emits
+    // no `file.deleted` for an upload that never became a file.
+    const emitted = await h.pool.query("SELECT 1 FROM outbox_events WHERE aggregate_id = $1", [presigned.body.id]);
+    expect(emitted.rowCount).toBe(0);
   });
 
   async function storageUsed(): Promise<number> {

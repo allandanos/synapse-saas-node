@@ -55,21 +55,25 @@ export class FlagUpdate {
   rollout_percentage?: number;
 }
 
-/** The reference's `@model_validator`: an override with no scope is a 422, not a row that matches nothing. */
-function RequiresScope(options?: ValidationOptions) {
+/**
+ * The reference's `@model_validator`: an override carries **exactly one**
+ * scope. Neither would match nothing; both used to be stored silently as a
+ * user override with an `organization_id` column that said otherwise.
+ */
+function RequiresExactlyOneScope(options?: ValidationOptions) {
   return (object: object, propertyName: string): void => {
     registerDecorator({
-      name: "requiresScope",
+      name: "requiresExactlyOneScope",
       target: object.constructor,
       propertyName,
       options,
       validator: {
         validate(_value: unknown, args: ValidationArguments): boolean {
           const body = args.object as OverrideCreate;
-          return Boolean(body.organization_id ?? body.user_id);
+          return (body.organization_id == null) !== (body.user_id == null);
         },
         defaultMessage(): string {
-          return "override requires organization_id or user_id";
+          return "override requires exactly one of organization_id or user_id";
         },
       },
     });
@@ -86,7 +90,7 @@ export class OverrideCreate {
   user_id?: string | null;
 
   @IsBoolean()
-  @RequiresScope()
+  @RequiresExactlyOneScope()
   enabled!: boolean;
 
   @IsOptional()

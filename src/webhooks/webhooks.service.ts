@@ -1,11 +1,15 @@
 import { randomBytes } from "node:crypto";
 import { Inject, Injectable } from "@nestjs/common";
+import { AuditWriter } from "../core/audit";
 import { SETTINGS, type Settings } from "../core/config";
-import { Database } from "../core/db/database";
+import { Database, type Tx } from "../core/db/database";
 import { WebhookDeliveryNotFoundError, WebhookEndpointNotFoundError } from "../core/errors";
+import { events } from "../core/events";
+import { OutboxWriter } from "../core/outbox";
 import { fernetEncrypt } from "./fernet";
 import {
   type WebhookDeliveryRead,
+  type WebhookEndpointFullRow,
   type WebhookEndpointRead,
   WebhookEndpointsRepository,
   toDeliveryRead,
@@ -33,6 +37,8 @@ export class WebhooksService {
   constructor(
     private readonly db: Database,
     private readonly endpoints: WebhookEndpointsRepository,
+    private readonly outbox: OutboxWriter,
+    private readonly audit: AuditWriter,
     @Inject(SETTINGS) private readonly settings: Settings,
   ) {}
 
@@ -49,6 +55,7 @@ export class WebhooksService {
         description: input.description,
         events: input.events,
       });
+      await this.recordEndpointEvent(tx, events.WEBHOOK_ENDPOINT_CREATED, row);
       return { ...toEndpointRead(row), secret };
     });
   }
@@ -61,6 +68,7 @@ export class WebhooksService {
     return this.db.transaction(async (tx) => {
       const row = await this.endpoints.findScoped(tx, endpointId, organizationId);
       if (!row) throw new WebhookEndpointNotFoundError("Webhook endpoint not found");
+      await this.recordEndpointEvent(tx, events.WEBHOOK_ENDPOINT_DELETED, row);
       await this.endpoints.remove(tx, endpointId);
     });
   }
@@ -71,6 +79,30 @@ export class WebhooksService {
   ): Promise<{ items: WebhookDeliveryRead[]; total: number }> {
     const page = await this.db.transaction((tx) => this.endpoints.pageDeliveries(tx, organizationId, filters));
     return { items: page.rows.map(toDeliveryRead), total: page.total };
+  }
+
+  /**
+   * The catalogued `webhook.endpoint_*` events plus an audit row, in the same
+   * transaction as the row change. The payload carries the url and the event
+   * filter — **never** the secret, which would otherwise travel to every other
+   * endpoint of the org and sit in the audit log forever.
+   */
+  private async recordEndpointEvent(tx: Tx, eventType: string, endpoint: WebhookEndpointFullRow): Promise<void> {
+    const payload = { endpoint_id: endpoint.id, url: endpoint.url, events: [...endpoint.events] };
+    await this.outbox.append(tx, {
+      eventType,
+      aggregateType: "webhook_endpoint",
+      aggregateId: endpoint.id,
+      organizationId: endpoint.organization_id,
+      payload,
+    });
+    await this.audit.log(tx, {
+      eventType,
+      organizationId: endpoint.organization_id,
+      targetType: "webhook_endpoint",
+      targetId: endpoint.id,
+      diff: payload,
+    });
   }
 
   /**

@@ -1,6 +1,6 @@
 import { Injectable } from "@nestjs/common";
 import { Database, type Tx } from "../core/db/database";
-import { ConflictError, FeatureFlagNotFoundError } from "../core/errors";
+import { ConflictError, FeatureFlagNotFoundError, InvalidRequestError } from "../core/errors";
 import { inRollout } from "./buckets";
 import { type FeatureFlagOverrideRow, type FlagRead, FlagsRepository, toFlagRead } from "./flags.repository";
 
@@ -99,7 +99,11 @@ export class FlagsService {
       await this.requireFlag(tx, flagKey);
       const organizationId = input.organization_id ?? null;
       const userId = input.user_id ?? null;
-      if (organizationId === null && userId === null) throw new FeatureFlagNotFoundError("Override requires an organization_id or user_id");
+      // Defence in depth behind the DTO: a 422, not a not-found wearing the
+      // wrong title (the reference used to raise FeatureFlagNotFoundError here).
+      if ((organizationId === null) === (userId === null)) {
+        throw new InvalidRequestError("Override requires exactly one of organization_id or user_id");
+      }
 
       const existing = await this.flags.findOverride(tx, flagKey, { organizationId, userId });
       const row = existing

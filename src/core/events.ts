@@ -48,7 +48,6 @@ export const events = {
   FILE_DELETED: "file.deleted",
   // Outbound webhook management
   WEBHOOK_ENDPOINT_CREATED: "webhook.endpoint_created",
-  WEBHOOK_ENDPOINT_UPDATED: "webhook.endpoint_updated",
   WEBHOOK_ENDPOINT_DELETED: "webhook.endpoint_deleted",
   // Usage
   USAGE_SOFT_LIMIT_REACHED: "usage.soft_limit_reached",
