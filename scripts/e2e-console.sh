@@ -88,7 +88,7 @@ docker start "$REDIS_NAME" >/dev/null 2>&1 || docker run -d --name "$REDIS_NAME"
 
 if [ "$KEYCLOAK" = "1" ]; then
   # The shipped realm only knows the reference's 8000/3000, and the reference
-  # tree is read-only: copy it and add this port's origins to the client.
+  # tree is read-only: copy it and add this run's origins to the client.
   log "Keycloak ($KEYCLOAK_NAME on $KEYCLOAK_PORT)"
   [ -f "$REFERENCE_ROOT/infrastructure/keycloak/realm-dev.json" ] || { echo "realm-dev.json not found under $REFERENCE_ROOT" >&2; exit 1; }
   rm -rf "$REALM_DIR" && mkdir -p "$REALM_DIR"
@@ -98,7 +98,6 @@ if [ "$KEYCLOAK" = "1" ]; then
   docker run -d --name "$KEYCLOAK_NAME" -p "${KEYCLOAK_PORT}:8080" \
     -e KC_BOOTSTRAP_ADMIN_USERNAME=admin -e KC_BOOTSTRAP_ADMIN_PASSWORD=admin \
     -v "$REALM_DIR:/opt/keycloak/data/import:ro" \
-    -v "$ROOT/scripts/keycloak-theme:/opt/keycloak/themes:ro" \
     "$KEYCLOAK_IMAGE" start-dev --import-realm --http-port=8080 >/dev/null
   wait_for "http://localhost:${KEYCLOAK_PORT}/realms/synapse/.well-known/openid-configuration" "Keycloak" 120 \
     || { docker logs "$KEYCLOAK_NAME" 2>&1 | tail -40 >&2; exit 1; }

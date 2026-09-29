@@ -6,10 +6,13 @@ in [`synapse-saas`](../synapse-saas) — see its
 [ADR 0012](../synapse-saas/docs/adr/0012-polyglot-ports-contract-first.md) and
 [porting guide](../synapse-saas/ports/README.md).
 
-**Contract pinned at:** `synapse-saas@60ff0e3` (`contracts/` is a snapshot of
-that commit; re-copy when the reference's `contracts/CHANGELOG.md` gains an entry).
-The bump from `6272ab3` is milestone 6's round trip — the reference adopted this
-port's findings in `7bdb348`; `contracts/` itself is byte-identical.
+**Contract pinned at:** `synapse-saas@cb1f6d1` plus the milestone-7 commit that
+follows it (`contracts/` is a snapshot; re-copy when the reference's
+`contracts/CHANGELOG.md` gains an entry). Only the changelog moved — it now
+records the ports' milestone-7 findings under "Findings from the ports'
+milestone 7"; `openapi-v1.json`, `events.json`, `problems.json` and
+`schema-v1.sql` are byte-identical to milestone 6's snapshot, because
+milestone 7 changed no path, payload or table.
 
 ## Status
 
@@ -26,10 +29,11 @@ port's findings in `7bdb348`; `contracts/` itself is byte-identical.
 A milestone is done when the corresponding `tests/conformance` modules pass
 against this server (`pnpm conformance`).
 
-The reference adopted two milestone-7 findings from this port while it was
-being written — the eager tuple convergence and the SSO spec's password
-locator — so both are aligned rather than carried; see "Where this port
-deliberately differs".
+The reference adopted this port's milestone-7 findings while it was being
+written — the eager tuple convergence, the organization-creation sync, the
+OpenFGA 1.x delete wording, the dead `SYNAPSE_KEYCLOAK_ALLOW_PASSWORD_GRANT`
+setting and the SSO spec's password locator — so all of them are aligned
+rather than carried; see "Where this port deliberately differs".
 
 Nothing is deferred: every contract surface, both authorization backends, the
 Redis caches, auth rate limiting, SSO and provider plan sync are in.
@@ -449,13 +453,12 @@ run clear of the reference's own dev stack. The server it boots uses the manual
 billing provider, SMTP pointed at MailHog, the in-process worker (outbox
 dispatch drives the invoice mail) and local-disk storage.
 
-`KEYCLOAK=1` additionally starts `quay.io/keycloak/keycloak:26.0` with the
-reference's dev realm and runs `sso.spec.ts` too (it self-skips without
-`E2E_KEYCLOAK=1`). The reference tree is read-only, so the realm is **copied**
-and the copy gains two things: this run's redirect URIs and web origins (the
-shipped realm only knows the reference's 8000/3000), and a login theme
-(`scripts/keycloak-theme`) whose only job is to make Keycloak's own login form
-reachable by the spec's locators — see "Where this port deliberately differs".
+`KEYCLOAK=1` additionally starts `quay.io/keycloak/keycloak:26.0` — the
+version the reference's nightly job pins — with the reference's dev realm, and
+runs `sso.spec.ts` too (it self-skips without `E2E_KEYCLOAK=1`). The reference
+tree is read-only, so the realm is **copied** and the copy adds exactly one
+thing: this run's redirect URIs and web origins, because the shipped realm only
+knows the reference's own 8000/3000.
 
 The console needs three things conformance does not exercise, all of which this
 server already does: CORS for the console origin **with credentials** and
@@ -687,7 +690,6 @@ src/
   cli/                    migrate, seed, seed-dev, plans-sync, authz-fga, jobs-run-once
 scripts/e2e-console.sh        the reference console's journeys against this server (KEYCLOAK=1 adds SSO)
 scripts/keycloak-realm.py     copies the reference's dev realm and adds this run's origins
-scripts/keycloak-theme/       the stock Keycloak login page with one relabelled control
 config/plans.yaml             the plan catalog, verbatim from the reference
 migrations/001_baseline.sql   = contracts/schema-v1.sql (applied by the raw-SQL runner)
 contracts/                    snapshot of the reference contract (openapi, events, problems, changelog)
@@ -714,8 +716,9 @@ contract, 409 `conflict` for duplicate invites and role keys, invite `role_keys`
 and organization name, IP-literal hosts, `check_function_bodies` in the
 baseline), so observable behaviour is aligned.
 
-Milestone 7 turned up three things, two of which the reference adopted while
-this port was being written:
+Milestone 7 turned up three things, all of which the reference adopted while
+this port was being written (`contracts/CHANGELOG.md`, "Findings from the
+ports' milestone 7"):
 
 - **Tuple sync converged only through the worker.** Under
   `SYNAPSE_AUTHZ_BACKEND=openfga` with the default `closed` fail mode, that
@@ -733,16 +736,14 @@ this port was being written:
   `getByLabel(/password/i)`, and every Keycloak from 22.0 to 26.0 labels the
   password-visibility toggle `aria-label="Show password"` — two matches,
   Playwright strict mode, a failing test on any image the reference's own
-  nightly `e2e-sso` job would use. The spec is now anchored (`/^password$/i`).
-- **A login theme is still needed to run it, and this port ships one.** The
-  anchored locator matches nothing against the stock `keycloak` theme, which
-  wraps each label's text in a PatternFly `<span>` on its own line. The
-  reference tree is read-only and the spec is never edited, so the realm
-  **copy** points at `scripts/keycloak-theme`: Keycloak's own unstyled `base`
-  login page (same form, same endpoints, label text exactly `Password`) with
-  the toggle relabelled so either spelling of the locator resolves to one
-  element.
-
+  nightly `e2e-sso` job would use. The spec now addresses the field by role
+  (`getByRole("textbox", { name: "Password", exact: true })`) and expects a
+  brand-new SSO user on onboarding, and it passes on `keycloak:26.0`
+  unmodified — so this port runs the journey against the stock realm and the
+  stock login theme, with only the redirect URIs added to the realm copy.
+- **`SYNAPSE_KEYCLOAK_ALLOW_PASSWORD_GRANT` was a dead setting**: the provider
+  implemented the grant, but `login` never called it. Both servers now proxy an
+  unknown or SSO-only account to Keycloak when it is on, and link or create it.
 Two places where this port is deliberately *stricter* than the reference, both
 invisible to the contract:
 
