@@ -9,6 +9,7 @@ import { Database } from "./db/database";
 import { MigrationRunner } from "./db/migrations";
 import { OutboxWriter } from "./outbox";
 import { RequestContext } from "./request-context";
+import { RateLimiter } from "./rate-limiter";
 import { RouteTable } from "./route-table";
 import { SecurityService } from "./security";
 
@@ -41,8 +42,9 @@ export function createPool(settings: Settings): Pool {
     OutboxWriter,
     AuditWriter,
     RouteTable,
+    RateLimiter,
   ],
-  exports: [SETTINGS, PG_POOL, CACHE_BACKEND, CacheRegistry, RequestContext, Database, MigrationRunner, SecurityService, OutboxWriter, AuditWriter, RouteTable],
+  exports: [SETTINGS, PG_POOL, CACHE_BACKEND, CacheRegistry, RequestContext, Database, MigrationRunner, SecurityService, OutboxWriter, AuditWriter, RouteTable, RateLimiter],
 })
 export class CoreModule implements OnApplicationShutdown {
   constructor(
