@@ -6,6 +6,29 @@ import type { Message, Notifier } from "./notifier";
 
 const CONNECTION_TIMEOUT_MS = 10_000;
 
+/** RFC 2045 base64 line length. */
+const BASE64_LINE_LENGTH = 76;
+
+/**
+ * The attachment part, byte-for-byte as the reference emits it (Python's
+ * `EmailMessage.add_attachment`): a bare `Content-Type`, base64, a *quoted*
+ * filename, then `MIME-Version` — in that order. Recipients parse any valid
+ * spelling, but the console's e2e journey matches this exact part, so nodemailer
+ * gets the source verbatim instead of composing its own (`name=` parameter,
+ * unquoted filename, no per-part MIME-Version).
+ */
+export function rawAttachmentPart(attachment: { filename: string; content: Buffer; contentType: string }): string {
+  const body = attachment.content
+    .toString("base64")
+    .replace(new RegExp(`(.{${String(BASE64_LINE_LENGTH)}})`, "g"), "$1\r\n");
+  return (
+    `Content-Type: ${attachment.contentType}\r\n` +
+    `Content-Transfer-Encoding: base64\r\n` +
+    `Content-Disposition: attachment; filename="${attachment.filename}"\r\n` +
+    `MIME-Version: 1.0\r\n\r\n${body}\r\n`
+  );
+}
+
 /**
  * SMTP delivery through the configured relay, failing soft: an email problem
  * must never fail the outbox dispatch that carries it.
@@ -31,11 +54,7 @@ export class SmtpNotifier implements Notifier {
         to: message.to,
         subject: message.subject,
         text: message.body,
-        attachments: (message.attachments ?? []).map((attachment) => ({
-          filename: attachment.filename,
-          content: attachment.content,
-          contentType: attachment.contentType,
-        })),
+        attachments: (message.attachments ?? []).map((attachment) => ({ raw: rawAttachmentPart(attachment) })),
       });
       this.logger.log(`email sent to=${message.to} subject=${JSON.stringify(message.subject)} attachments=${String(message.attachments?.length ?? 0)}`);
     } catch (error) {
