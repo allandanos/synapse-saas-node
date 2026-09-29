@@ -15,24 +15,22 @@ that commit; re-copy when the reference's `contracts/CHANGELOG.md` gains an entr
 |---|---|---|
 | 1 | pure logic + core + probes/`/v1/meta` | **done** — `/healthz`, `/readyz`, `/v1/meta`, typed settings, problem documents, request context, DB + RLS GUCs, raw-SQL migrations, outbox + audit writers |
 | 2 | identity, tenancy, authorization (RBAC), API keys | **done** — `test_meta_and_health`, `test_problem_documents`, `test_auth`, `test_tenancy`, `test_authorization`, `test_api_keys` pass |
-| 3 | subscriptions, entitlements, usage | **done** — `test_subscriptions` (4/4), `test_usage_and_entitlements` (7/8: `test_feature_gate_problem_shape` needs `GET /v1/agents`, a milestone-5 route), `test_api_keys` fully, no milestone-2 regression (`pnpm conformance:m3`) |
+| 3 | subscriptions, entitlements, usage | **done** — `test_subscriptions` (4/4), `test_usage_and_entitlements` (8/8), `test_api_keys` fully, no milestone-2 regression (`pnpm conformance:m3`) |
 | 4 | billing providers, invoicing, notifications, worker | **done** — `test_billing` (6/6) plus no milestone 1–3 regression (`pnpm conformance:m4`) |
-| 5 | webhooks, files, flags, audit, agents | — |
+| 5 | webhooks, files, flags, audit, agents | **done** — `test_webhooks`, `test_files`, `test_feature_flags`, `test_audit`, `test_agents` pass and the **whole** reference suite is green (51/51, `pnpm conformance`) |
 | 6 | console parity (Playwright) | — |
 | 7 | OIDC + OpenFGA, hardening | — |
 
 A milestone is done when the corresponding `tests/conformance` modules pass
 against this server (`pnpm conformance`).
 
-Deferred to later milestones: the webhook-endpoint and delivery routes
-(`/v1/webhooks/*`, milestone 5 — deliveries are already created and signed by
-the worker, and endpoint rows are interoperable with the reference), presigned
-file storage and the `stored_files` half of `purge_expired` (milestone 5), the
-Redis-backed entitlement cache (entitlements are computed per request behind
-`EntitlementsService.effectiveForOrg`; the reference's invalidation points are
-marked by `EntitlementsService.invalidate`), Stripe catalog plan-sync from the
-CLI (`StripeBillingProvider.upsertProductAndPrice` exists, `plans:sync` does
-not call it), and auth rate limiting.
+Deferred to later milestones: the Redis-backed caches — entitlements are
+computed per request behind `EntitlementsService.effectiveForOrg` and flags are
+evaluated per check behind `FlagsService.evaluate`; the reference's
+invalidation points are marked by `EntitlementsService.invalidate` and
+`FlagsService.invalidate` — Stripe catalog plan-sync from the CLI
+(`StripeBillingProvider.upsertProductAndPrice` exists, `plans:sync` does not
+call it), and auth rate limiting.
 
 ## Stack
 
@@ -45,7 +43,9 @@ ORM's generated DDL is ruled out by ADR 0012) · `class-validator` DTOs →
 parameters as the reference) · `jsonwebtoken` (HS256, same claims) · zod-typed
 settings and plan catalog (`yaml` parses `config/plans.yaml`) · `pdfkit` (invoice
 PDFs) · `nodemailer` (SMTP) · `@nestjs/schedule` (the worker's cadence) ·
-Vitest + supertest.
+`multer` (multipart uploads, memory storage) and `@aws-sdk/client-s3` +
+`@aws-sdk/s3-request-presigner` (the S3-compatible storage backend and its
+SigV4 presigning; the local-disk backend needs neither) · Vitest + supertest.
 
 ### Design notes
 
@@ -162,6 +162,47 @@ Vitest + supertest.
   under `SYNAPSE_SECRET_KEY` — `src/webhooks/fernet.ts` implements the format
   (AES-128-CBC + HMAC-SHA256, padded base64url) rather than picking a library,
   so an endpoint created by any implementation is deliverable by any other.
+- **A webhook secret exists for exactly one response.** `POST
+  /v1/webhooks/endpoints` mints `whsec_…`, encrypts it before it touches a
+  column and returns it once; nothing reads it back but the worker, at
+  delivery time, and the list route has no `secret` field to leak. `url` is
+  parsed with WHATWG `URL` rather than `@IsUrl` (which accepts bare
+  hostnames): the normalised `href` that gets stored is exactly what
+  pydantic's `str(HttpUrl)` yields. Endpoint and delivery ids are org-scoped,
+  so a foreign one is a 404, and retry returns any delivery to `pending` with
+  its attempts cleared and due now.
+- **Files: quota first, then bytes, then the row.** `storage_bytes` is a
+  LEVEL, so `POST /v1/files` reserves capacity before a single byte is
+  written (402 with `upgrade_url` on a breach), writes the object, then
+  indexes it; a failure after the reservation releases it. Keys are
+  `{org_id}/{name}` — the org prefix IS the tenant boundary for bytes, so no
+  backend is ever trusted to scope a read, and traversal is refused in
+  `src/storage/keys.ts`. Local disk is the default (`SYNAPSE_STORAGE_ROOT`)
+  and answers 409 `presign_unsupported` in both directions; setting
+  `SYNAPSE_S3_BUCKET` selects the S3-compatible backend (AWS, R2, MinIO). On
+  that backend `presign-upload` reserves the quota, hands out a signed PUT and
+  indexes a `pending` row; `complete` verifies size and, on a mismatch,
+  releases the reservation and soft-deletes in a transaction that **commits
+  before** the 409 — so a tenant is never billed for bytes that never arrived
+  — and `purge_expired` does the same for uploads that were simply abandoned.
+- **Flags are not entitlements.** Entitlements answer "what did this org pay
+  for?" (`@RequireFeature` + `FeatureGuard`, 403 with upgrade hints); flags
+  answer "is this code path on yet?" (`@RequireFlag` + `FeatureFlagGuard`,
+  403 carrying the flag key). Resolution is user override → org override →
+  global default, an unknown or archived flag is off, and percentage rollouts
+  bucket deterministically: the first four bytes of `sha256("{flag}:{id}")`
+  big-endian, modulo 10 000, in when below `BUCKETS * pct // 100`. Defining
+  flags and overriding them for somebody else is an operator action (ADR
+  0008), so tenants get 404 on everything but `check/{key}`.
+- **Agents are governance, not execution** (ADR 0007). The whole
+  `/v1/agents` family sits behind the `agents` entitlement declared once on
+  the controller and enforced ahead of the permission check, `config` is
+  opaque JSON owned by whatever runtime executes the agent, and delete is a
+  soft delete whose slug stays taken — registry rows are billing history.
+- **The audit read is just a read.** `GET /v1/audit` (permission
+  `audit:read`) pages the rows `AuditWriter` has been writing since milestone
+  2, newest first, filterable by `event_type` and `actor_user_id`; platform
+  rows (`organization_id IS NULL`) never surface on a tenant's page.
 
 ## Run
 
@@ -178,8 +219,8 @@ pnpm jobs:run-once --all              # run every job once, print `name: count`,
 pnpm jobs:run-once dispatch_outbox deliver_webhooks
 pnpm conformance:m2                   # milestone-2 modules of the reference suite → http://localhost:8090
 pnpm conformance:m3                   # milestones 1–3
-pnpm conformance:m4                   # milestones 1–4 (the current gate)
-pnpm conformance                      # the whole reference suite
+pnpm conformance:m4                   # milestones 1–4
+pnpm conformance                      # the whole reference suite (the current gate)
 ```
 
 Boot sequence (`src/bootstrap.ts`): apply `migrations/*.sql` once each (tracked
@@ -240,15 +281,13 @@ cd ../synapse-saas && \
 SYNAPSE_CONFORMANCE_API_URL=http://localhost:8090 \
 SYNAPSE_CONFORMANCE_ADMIN_EMAIL=operator@platform.example.com \
 SYNAPSE_CONFORMANCE_ADMIN_PASSWORD=operator-password-12345 \
-uv run pytest tests/conformance/test_meta_and_health.py tests/conformance/test_problem_documents.py \
-  tests/conformance/test_auth.py tests/conformance/test_tenancy.py tests/conformance/test_authorization.py \
-  tests/conformance/test_api_keys.py tests/conformance/test_subscriptions.py \
-  tests/conformance/test_usage_and_entitlements.py tests/conformance/test_billing.py \
-  -m "" --no-cov -q -p no:cacheprovider
+uv run pytest tests/conformance -m "" --no-cov -q -p no:cacheprovider
 ```
 
-Expected today: 42 passed, 1 failed — `test_feature_gate_problem_shape` gets a
-404 from `GET /v1/agents` (milestone 5) instead of the 403 feature gate.
+Expected today: **51 passed** — every module, no permitted failures. The
+server needs `SYNAPSE_BILLING_PROVIDER=manual`, the bootstrap-admin variables
+below, and a writable `SYNAPSE_STORAGE_ROOT` (the file journeys run on the
+local-disk backend; the S3 path is covered by `pnpm test:db`).
 
 ### Tests
 
@@ -263,8 +302,13 @@ Expected today: 42 passed, 1 failed — `test_feature_gate_problem_shape` gets a
   against a local stub HTTP server, the invoice state machine and numbering,
   overage/adjustment line construction, PDF bytes, the Fernet codec — including
   a token minted by the reference's `cryptography.fernet` — the outbound
-  signature, both retry ladders and `jobs run-once` selection) and the probe
-  controller. No database needed; the DB-backed suites are skipped.
+  signature, both retry ladders and `jobs run-once` selection, and the
+  milestone-5 ones: flag bucketing against vectors computed by the reference's
+  `bucket_of` plus rollout monotonicity and spread, storage key validation and
+  traversal, both backends' put/get/head/delete, the presigned URL shape, the
+  `whsec_` secret and the `HttpUrl` acceptance set, and the endpoint read that
+  must never carry a secret) and the probe controller. No database needed; the
+  DB-backed suites are skipped.
 - `pnpm test:db` — additionally runs the supertest journeys in
   `test/integration/` (shared bootstrap in `harness.ts`): `journey.test.ts`
   (register → org → invite → accept → roles → API keys → operator suspension →
@@ -284,7 +328,20 @@ Expected today: 42 passed, 1 failed — `test_feature_gate_problem_shape` gets a
   infrastructure failure rolling the ledger row back; recurring billing
   renewing an ended period; invite/reset/invoice mail captured through the
   notifier seam with the PDF attached; `ensure_partitions` creating +3 months
-  and `purge_expired` honouring retention) against `SYNAPSE_TEST_DATABASE_URL`
+  and `purge_expired` honouring retention), `platform.test.ts` (endpoint
+  secret shown once and stored Fernet-encrypted → list masked → a delivery
+  produced by a real `member.invited` → filter → retry → delete cascading its
+  deliveries; file upload → list → download bytes → gauge up → delete → gauge
+  down, the 402 before a byte is written, both presign 409s and the
+  `storage_error` family; flag override layering, upsert, duplicate/unknown/
+  scope-less rejections and rollout determinism; the audit page with filters
+  and API-key attribution; the agent gate → grant → CRUD → slug-reuse 409 with
+  the exact event and audit vocabulary each mutation leaves) and
+  `storage-s3.test.ts` (the presigned half against `StubS3Server`, an S3-shaped
+  object store over plain HTTP: reserve → presign → PUT → complete → ready,
+  complete without a PUT answering 409 with the reservation released, a size
+  mismatch, and `purge_expired` reclaiming an abandoned upload) against
+  `SYNAPSE_TEST_DATABASE_URL`
   (default `postgresql://synapse:synapse@localhost:5434/synapse_node_test`).
   Every table of that database is truncated first — never point it at data you
   care about. `SYNAPSE_TEST_TENANT_ISOLATION=app_and_rls` runs them with RLS
@@ -312,6 +369,12 @@ reference's `postgresql+asyncpg://` DSN form is accepted):
 | `SYNAPSE_NOTIFIER` | `smtp` | `noop` logs instead of sending (also the default when no SMTP host is set) |
 | `SYNAPSE_SMTP_HOST` / `SYNAPSE_SMTP_PORT` / `SYNAPSE_SMTP_FROM` | ``, `1025`, `synapse@localhost` | the relay |
 | `SYNAPSE_SMTP_USERNAME` / `SYNAPSE_SMTP_PASSWORD` / `SYNAPSE_SMTP_TLS` | ``, ``, `none` | AUTH credentials and transport security (`none`\|`starttls`\|`ssl`); AUTH over plaintext is refused |
+| `SYNAPSE_STORAGE_ROOT` | `.storage` | local-disk object root; used whenever no bucket is configured |
+| `SYNAPSE_S3_BUCKET` | `` | set it to select the S3-compatible backend (unlocks presigned URLs) |
+| `SYNAPSE_S3_ENDPOINT_URL` | `` | custom endpoint for MinIO/R2 (also switches to path-style buckets); empty ⇒ AWS |
+| `SYNAPSE_S3_REGION` | `us-east-1` | SigV4 region |
+| `SYNAPSE_S3_ACCESS_KEY_ID` / `SYNAPSE_S3_SECRET_ACCESS_KEY` | `` | credentials; unset falls back to the AWS default chain |
+| `SYNAPSE_STORAGE_PRESIGN_SECONDS` | `3600` | presigned URL lifetime; `purge_expired` releases abandoned uploads at twice this age |
 | `SYNAPSE_WORKER_ENABLED` | `true` | run the job cadence in-process with the API |
 | `SYNAPSE_AUDIT_RETENTION_DAYS` | `365` | how long `purge_expired` keeps audit rows |
 | `SYNAPSE_PLANS_FILE` | `config/plans.yaml` | the plan catalog (pricing-as-config source of truth) |
@@ -358,7 +421,14 @@ src/
                           reporting/, webhooks/ (raw-body ingest + idempotency ledger) — engine:
                           BillingModule, routes: BillingRoutesModule
   webhooks/               outbound delivery: envelope + ladders, Fernet codec, signer, deliveries
-                          repository, WebhookDeliveryService (WebhooksModule; routes are milestone 5)
+                          repository, WebhookDeliveryService (WebhooksModule)
+                          + endpoints repository, WebhooksService, /v1/webhooks/* (WebhooksRoutesModule)
+  storage/                keys (org-scoped validation), backend interface, local-disk + S3 backends,
+                          files repository, FilesService, /v1/files (StorageModule)
+  feature-flags/          buckets (deterministic rollouts), flags repository + service, @RequireFlag
+                          guard, /v1/feature-flags (FeatureFlagsModule)
+  agents/                 repository, service, /v1/agents behind @RequireFeature("agents") (AgentsModule)
+  audit/                  repository + /v1/audit over the rows core/audit.ts writes (AuditRoutesModule)
   notifications/          Notifier seam, SMTP + Noop transports, outbox-event handlers (NotificationsModule)
   worker/                 advisory lock, outbox repository, JobsService (the seven jobs), the @Cron/@Interval
                           cadence (WorkerModule), and worker.ts (standalone entrypoint)
@@ -370,10 +440,13 @@ test/unit, test/integration   vitest (SWC for decorator metadata)
 ```
 
 Module graph (acyclic): `Core ← Subscriptions ← Entitlements ← Usage ← Authorization ← Tenancy ← Billing ← Notifications ← Worker`,
-with `{Roles, ApiKeys, Identity, *RoutesModules}` on top and `Webhooks` beside
-`Core`. Engines never import route modules; `Identity` imports `Usage` to meter
-API keys; `Billing` never imports `Notifications` (mail is a post-commit
-consumer the worker drives).
+with `{Roles, ApiKeys, Identity, Agents, Storage, FeatureFlags, *RoutesModules}`
+on top and `Webhooks` beside `Core`. Engines never import route modules;
+`Identity` imports `Usage` to meter API keys; `Storage` imports `Usage` for the
+`storage_bytes` gauge and `Entitlements` for the `api_access` gate; `Worker`
+imports `Usage` plus the files repository so `purge_expired` can hand back the
+bytes an abandoned presigned upload reserved; `Billing` never imports
+`Notifications` (mail is a post-commit consumer the worker drives).
 
 ## Where this port deliberately differs from the reference server
 
@@ -382,10 +455,10 @@ The reference adopted this port's milestone-2 findings in `synapse-saas@4de2026`
 contract, 409 `conflict` for duplicate invites and role keys, invite `role_keys`
 and organization name, IP-literal hosts, `check_function_bodies` in the
 baseline), so observable behaviour is aligned. Remaining differences are
-internal: entitlements are not cached (computed per request, with the
-reference's invalidation points marked).
+internal: entitlements and feature flags are not cached (resolved per request,
+with the reference's invalidation points marked).
 
-Two places where this port is deliberately *stricter* than the reference, both
+Three places where this port is deliberately *stricter* than the reference, all
 invisible to the contract:
 
 - **Xendit amounts.** The reference does `int(float(amount) * 100)`
@@ -394,5 +467,33 @@ invisible to the contract:
   says money is integer minor units end to end.
 - **`verifyWebhook` always rejects through a promise** rather than throwing
   synchronously, so a caller cannot miss a refusal by forgetting to await.
+- **`GET /v1/webhooks/endpoints` orders by `created_at`.** The reference's
+  `WebhookService.list_endpoints` (`webhooks/service.py:81`) has no `ORDER BY`,
+  so the rows it hands to `paginate_in_memory` arrive in whatever order
+  Postgres returns — pages can repeat or skip an endpoint. The order is
+  unspecified by the contract, so imposing one breaks nothing.
+
+Three things the contract and the reference server disagree about, left as the
+reference has them and reported upstream rather than "fixed" here (ADR 0012):
+
+- **`contracts/events.json` advertises five events nothing emits.**
+  `file.uploaded`, `file.deleted`, `webhook.endpoint_created`,
+  `webhook.endpoint_updated` and `webhook.endpoint_deleted` are in the public
+  catalog and defined in `core/events.py:55-56,64-66`, but `storage/router.py`
+  and `webhooks/service.py` contain no `append_outbox` call — a tenant
+  subscribing to them receives nothing. Neither do those two routers write
+  audit rows, so uploading or deleting a file and creating or deleting a
+  webhook endpoint leave no trail on `GET /v1/audit`. This port matches the
+  server, not the catalog.
+- **A flag override may carry both scopes, and the org half is then ignored.**
+  `OverrideCreate._require_scope` (`feature_flags/schemas.py:42`) only rejects
+  an override with *neither* `organization_id` nor `user_id`; with both,
+  `FeatureFlagService._override` (`service.py:211`) matches on `user_id`
+  alone, so the row is written and read back as a user override while its
+  `organization_id` column says otherwise.
+- **`set_override` answers 404 `feature_flag_not_found` for a missing scope**
+  (`service.py:151`) — a validation problem wearing a not-found title. The
+  route can never reach it (the schema rejects first with 422), so the port
+  keeps both behaviours exactly where the reference puts them.
 
 Package: `@synapse-saas/server`. Repository: `allandanos/synapse-saas-node`. Licence: Apache-2.0.
