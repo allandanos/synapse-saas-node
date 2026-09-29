@@ -1,5 +1,6 @@
 import { Module } from "@nestjs/common";
 import { ScheduleModule } from "@nestjs/schedule";
+import { AuthorizationModule } from "../authorization/authorization.module";
 import { BillingModule } from "../billing/billing.module";
 import { EntitlementsModule } from "../entitlements/entitlements.module";
 import { NotificationsModule } from "../notifications/notifications.module";
@@ -19,7 +20,7 @@ import { WorkerScheduler } from "./worker.scheduler";
  * once each.
  */
 @Module({
-  imports: [ScheduleModule.forRoot(), BillingModule, SubscriptionsModule, EntitlementsModule, WebhooksModule, NotificationsModule, UsageModule],
+  imports: [ScheduleModule.forRoot(), AuthorizationModule, BillingModule, SubscriptionsModule, EntitlementsModule, WebhooksModule, NotificationsModule, UsageModule],
   providers: [AdvisoryLock, OutboxRepository, FilesRepository, JobsService, WorkerScheduler],
   exports: [JobsService],
 })

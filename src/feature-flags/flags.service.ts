@@ -1,4 +1,6 @@
 import { Injectable } from "@nestjs/common";
+import { CACHE_NAMESPACES, CacheRegistry } from "../core/cache/cache.registry";
+import type { VersionedCache } from "../core/cache/versioned-cache";
 import { Database, type Tx } from "../core/db/database";
 import { ConflictError, FeatureFlagNotFoundError, InvalidRequestError } from "../core/errors";
 import { inRollout } from "./buckets";
@@ -18,18 +20,21 @@ export interface FlagScope {
  * with a deterministic percentage rollout when one is configured. Unknown and
  * archived flags are off, so new code paths stay dark by default.
  *
- * The reference caches resolutions under three scope versions (`all`,
- * `org:<id>`, `user:<id>`) and bumps them on every mutation. There is no Redis
- * here, so every check evaluates against the database; the mutation sites that
- * would bump a version are marked `invalidate(...)` so the cache can be
- * dropped in without hunting for them.
+ * Resolutions are cached under three scope versions (`all`, `org:<id>`,
+ * `user:<id>`) so any of the three invalidations — a flag edit, an org
+ * override, a user override — misses correctly.
  */
 @Injectable()
 export class FlagsService {
+  private readonly cache: VersionedCache;
+
   constructor(
     private readonly db: Database,
     private readonly flags: FlagsRepository,
-  ) {}
+    caches: CacheRegistry,
+  ) {
+    this.cache = caches.namespace(CACHE_NAMESPACES.FLAGS);
+  }
 
   // ── Resolution ──────────────────────────────────────────────────────────────
 
@@ -38,6 +43,18 @@ export class FlagsService {
   }
 
   async evaluate(tx: Tx, flagKey: string, scope: FlagScope): Promise<boolean> {
+    const organizationId = scope.organizationId ?? null;
+    const userId = scope.userId ?? null;
+    const scopes = ["all", `org:${String(organizationId)}`, `user:${String(userId)}`];
+    const cacheKey = `${flagKey}|${String(organizationId)}|${String(userId)}`;
+    const [cached, token] = await this.cache.getScoped(cacheKey, ...scopes);
+    if (cached !== null) return cached === "1";
+    const enabled = await this.resolve(tx, flagKey, scope);
+    await this.cache.setScoped(cacheKey, enabled ? "1" : "0", token);
+    return enabled;
+  }
+
+  private async resolve(tx: Tx, flagKey: string, scope: FlagScope): Promise<boolean> {
     const flag = await this.flags.findByKey(tx, flagKey);
     if (!flag) return false; // unknown flags are off
 
@@ -75,7 +92,7 @@ export class FlagsService {
         enabled: input.enabled ?? false,
         rolloutPercentage: input.rollout_percentage ?? null,
       });
-      this.invalidate("all");
+      await this.invalidate(tx, "all");
       return toFlagRead(row);
     });
   }
@@ -84,7 +101,7 @@ export class FlagsService {
     return this.db.transaction(async (tx) => {
       await this.requireFlag(tx, key);
       const row = await this.flags.updateFlag(tx, key, { enabled: patch.enabled, rolloutPercentage: patch.rollout_percentage });
-      this.invalidate("all");
+      await this.invalidate(tx, "all");
       return toFlagRead(row);
     });
   }
@@ -109,7 +126,7 @@ export class FlagsService {
       const row = existing
         ? await this.flags.updateOverride(tx, existing.id, { enabled: input.enabled, note: input.note ?? null })
         : await this.flags.insertOverride(tx, { flagKey, organizationId, userId, enabled: input.enabled, note: input.note ?? null });
-      this.bumpScope(organizationId, userId);
+      await this.bumpScope(tx, organizationId, userId);
       return row;
     });
   }
@@ -119,7 +136,7 @@ export class FlagsService {
       const row = await this.flags.findOverrideById(tx, overrideId);
       if (!row) throw new FeatureFlagNotFoundError("Override not found");
       await this.flags.deleteOverride(tx, overrideId);
-      this.bumpScope(row.organization_id, row.user_id);
+      await this.bumpScope(tx, row.organization_id, row.user_id);
     });
   }
 
@@ -129,12 +146,13 @@ export class FlagsService {
     if (!(await this.flags.findByKey(tx, key))) throw new FeatureFlagNotFoundError(`Flag '${key}' not found`);
   }
 
-  private bumpScope(organizationId: string | null, userId: string | null): void {
-    if (organizationId !== null) this.invalidate(`org:${organizationId}`);
-    if (userId !== null) this.invalidate(`user:${userId}`);
+  private async bumpScope(tx: Tx, organizationId: string | null, userId: string | null): Promise<void> {
+    if (organizationId !== null) await this.invalidate(tx, `org:${organizationId}`);
+    if (userId !== null) await this.invalidate(tx, `user:${userId}`);
   }
 
-  /** The reference's cache-version bump. Nothing is cached here yet; this marks where it would be. */
-  // eslint-disable-next-line @typescript-eslint/no-empty-function
-  private invalidate(_scope: string): void {}
+  /** Now (this request sees the change) and after commit (nobody caches pre-commit rows). */
+  private invalidate(tx: Tx, scope: string): Promise<void> {
+    return this.cache.invalidate(tx, scope);
+  }
 }

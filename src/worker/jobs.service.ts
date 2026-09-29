@@ -1,4 +1,5 @@
 import { Inject, Injectable, Logger } from "@nestjs/common";
+import { FgaSyncService } from "../authorization/fga/sync";
 import { InvoicingService } from "../billing/invoicing/invoicing.service";
 import { locallyBilledProviderNames } from "../billing/providers";
 import { SETTINGS, type Settings } from "../core/config";
@@ -65,6 +66,7 @@ export class JobsService {
     private readonly invoicing: InvoicingService,
     private readonly entitlements: EntitlementsService,
     private readonly notifications: NotificationHandlers,
+    private readonly fgaSync: FgaSyncService,
     private readonly usage: UsageService,
     private readonly files: FilesRepository,
   ) {}
@@ -124,13 +126,21 @@ export class JobsService {
           return done;
         });
 
-        // Post-commit consumers. Best effort and logged; milestone 7 adds the
-        // OpenFGA tuple sync alongside notifications.
+        // In-process consumers run only after the events are durably
+        // published: a crash or retry cannot send the same invite/invoice
+        // twice. Failures are logged; the authz sync additionally re-queues
+        // itself on the next membership change.
+        const consumers = [
+          (type: string, payload: Record<string, unknown>) => this.notifications.handle(type, payload),
+          (type: string, payload: Record<string, unknown>) => this.fgaSync.handleEvent(type, payload),
+        ];
         for (const row of published) {
-          try {
-            await this.notifications.handle(row.event_type, row.payload);
-          } catch (error) {
-            this.logger.warn(`internal consumer failed type=${row.event_type}: ${error instanceof Error ? error.message : String(error)}`);
+          for (const consume of consumers) {
+            try {
+              await consume(row.event_type, row.payload);
+            } catch (error) {
+              this.logger.warn(`internal consumer failed type=${row.event_type}: ${error instanceof Error ? error.message : String(error)}`);
+            }
           }
         }
         return published.length;
@@ -215,7 +225,7 @@ export class JobsService {
           return rows;
         });
         // Invalidate AFTER the commit so no reader caches the pre-revocation rows.
-        for (const organizationId of new Set(touched.map((row) => row.organization_id))) this.entitlements.invalidate(organizationId);
+        for (const organizationId of new Set(touched.map((row) => row.organization_id))) await this.entitlements.invalidateAfterCommit(organizationId);
         return touched.length;
       },
       0,

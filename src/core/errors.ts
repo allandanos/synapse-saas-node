@@ -137,6 +137,10 @@ export const UploadIncompleteError = define(409, "upload_incomplete");
 export const WebhookEndpointNotFoundError = define(404, "webhook_endpoint_not_found");
 export const WebhookDeliveryNotFoundError = define(404, "webhook_delivery_not_found");
 
+// ── Authorization backend (OpenFGA, ADR 0009) ─────────────────────────────────
+/** OpenFGA unreachable or refusing; the caller's fail mode decides what it means. */
+export const FgaError = define(503, "authorization_backend_unavailable");
+
 // ── Misc ───────────────────────────────────────────────────────────────────────
 export const NotFoundError = define(404, "not_found");
 export const MethodNotAllowedError = define(405, "method_not_allowed");

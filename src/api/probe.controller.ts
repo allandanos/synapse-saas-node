@@ -1,5 +1,6 @@
 import { Controller, Get, Inject, Res } from "@nestjs/common";
 import type { Response } from "express";
+import { CacheRegistry } from "../core/cache/cache.registry";
 import { SETTINGS, type Settings } from "../core/config";
 import { Database } from "../core/db/database";
 import { Public } from "../identity/public.decorator";
@@ -10,6 +11,7 @@ import { Public } from "../identity/public.decorator";
 export class ProbeController {
   constructor(
     private readonly db: Database,
+    private readonly cache: CacheRegistry,
     @Inject(SETTINGS) private readonly settings: Settings,
   ) {}
 
@@ -28,7 +30,7 @@ export class ProbeController {
     } catch (error) {
       checks.database = `error: ${error instanceof Error ? error.message : String(error)}`;
     }
-    checks.redis = "not_configured";
+    checks.redis = await this.cache.health();
     const ok = Object.values(checks).every((value) => value === "ok" || value === "not_configured");
     res.status(ok ? 200 : 503);
     return { status: ok ? "ok" : "error", checks };

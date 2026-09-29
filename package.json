@@ -43,6 +43,7 @@
     "class-validator": "^0.14.1",
     "cookie-parser": "^1.4.7",
     "express": "^5.2.1",
+    "ioredis": "^6.0.0",
     "jsonwebtoken": "^9.0.3",
     "multer": "^2.4.0",
     "nestjs-cls": "^5.0.0",

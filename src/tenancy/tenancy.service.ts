@@ -1,5 +1,7 @@
 import { Inject, Injectable, Logger } from "@nestjs/common";
 import { RolesRepository } from "../authorization/roles.repository";
+import { AuthorizationService } from "../authorization/authorization.service";
+import { FgaSyncService } from "../authorization/fga/sync";
 import { SYSTEM_ROLE_MEMBER, SYSTEM_ROLE_OWNER } from "../authorization/permissions";
 import { AuditWriter } from "../core/audit";
 import { SETTINGS, type Settings } from "../core/config";
@@ -42,6 +44,8 @@ export class TenancyService {
     private readonly orgs: OrganizationsRepository,
     private readonly members: MembershipsRepository,
     private readonly roles: RolesRepository,
+    private readonly authz: AuthorizationService,
+    private readonly fga: FgaSyncService,
     private readonly audit: AuditWriter,
     private readonly outbox: OutboxWriter,
     private readonly plans: PlansRepository,
@@ -266,6 +270,7 @@ export class TenancyService {
       payload: { email: user.email },
     });
     await this.syncSeatGauge(tx, organizationId);
+    await this.authz.invalidateUserPerms(tx, user.userId, organizationId);
   }
 
   updateMembership(membershipId: string, organizationId: string, patch: { roleKeys?: string[] | null; status?: string | null }): Promise<MembershipRead> {
@@ -276,6 +281,7 @@ export class TenancyService {
         await this.roles.detachAllFromMembership(tx, membershipId);
         for (const key of patch.roleKeys) await this.attachRole(tx, membershipId, organizationId, key);
         diff.roles = patch.roleKeys;
+        await this.invalidatePerms(tx, membership.user_id, organizationId);
       }
       if (patch.status != null && patch.status !== membership.status) {
         await this.members.setStatus(tx, membershipId, patch.status);
@@ -284,7 +290,11 @@ export class TenancyService {
       if (Object.keys(diff).length > 0) {
         await this.audit.log(tx, { eventType: events.MEMBER_UPDATED, organizationId, targetType: "membership", targetId: membershipId, diff });
       }
-      if ("status" in diff) await this.syncSeatGauge(tx, organizationId);
+      if ("status" in diff) {
+        await this.syncSeatGauge(tx, organizationId);
+        // Suspended members keep no tuples; reactivated ones get them back.
+        await this.invalidatePerms(tx, membership.user_id, organizationId);
+      }
       return toMembershipRead(await this.mustFindMembership(tx, membershipId));
     });
   }
@@ -305,6 +315,8 @@ export class TenancyService {
       });
       await this.members.delete(tx, membershipId);
       await this.syncSeatGauge(tx, organizationId);
+      // OpenFGA (when active): the removed member's tuples must go.
+      await this.fga.queue(tx, organizationId, membership.user_id);
     });
   }
 
@@ -325,6 +337,12 @@ export class TenancyService {
       currentPeriodStart: now,
       currentPeriodEnd: new Date(now.getTime() + 30 * 86_400_000),
     });
+  }
+
+  /** Drop the cached permissions of one member so the next request recomputes. */
+  private async invalidatePerms(tx: Tx, userId: string | null, organizationId: string): Promise<void> {
+    if (userId === null) return;
+    await this.authz.invalidateUserPerms(tx, userId, organizationId);
   }
 
   /** `users` is a gauge: active members + pending invites, set after every change. */

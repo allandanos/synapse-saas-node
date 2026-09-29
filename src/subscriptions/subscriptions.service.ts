@@ -1,5 +1,7 @@
 import { Injectable } from "@nestjs/common";
 import { AuditWriter } from "../core/audit";
+import { CACHE_NAMESPACES, CacheRegistry } from "../core/cache/cache.registry";
+import type { VersionedCache } from "../core/cache/versioned-cache";
 import type { Tx } from "../core/db/database";
 import { PlanNotFoundError, SubscriptionNotFoundError, TrialNotAllowedError } from "../core/errors";
 import { events } from "../core/events";
@@ -77,12 +79,27 @@ export function planSnapshot(plan: PlanWithDetails): Record<string, unknown> {
  */
 @Injectable()
 export class SubscriptionsService {
+  /**
+   * The entitlement cache, same namespace as `EntitlementsService` (the
+   * reference keeps a second `VersionedCache("entl")` here for exactly this).
+   * Every state change bumps it: the org's features and limits just moved.
+   */
+  private readonly entitlementCache: VersionedCache;
+
   constructor(
     private readonly plans: PlansRepository,
     private readonly subscriptions: SubscriptionsRepository,
     private readonly audit: AuditWriter,
     private readonly outbox: OutboxWriter,
-  ) {}
+    caches: CacheRegistry,
+  ) {
+    this.entitlementCache = caches.namespace(CACHE_NAMESPACES.ENTITLEMENTS);
+  }
+
+  /** Bump now (this request recomputes) and again after the commit. */
+  private bumpEntitlements(tx: Tx, organizationId: string): Promise<void> {
+    return this.entitlementCache.invalidate(tx, organizationId);
+  }
 
   // ── Queries ─────────────────────────────────────────────────────────────────
 
@@ -134,6 +151,7 @@ export class SubscriptionsService {
     });
     const eventType = status === "trialing" ? events.SUBSCRIPTION_TRIAL_STARTED : events.SUBSCRIPTION_ACTIVATED;
     await this.emit(tx, eventType, subscription, input.plan, { organization_id: input.organizationId });
+    await this.bumpEntitlements(tx, input.organizationId);
     return { subscription, plan: input.plan };
   }
 
@@ -219,6 +237,7 @@ export class SubscriptionsService {
       targetId: updated.id,
       diff: { from: fromSnapshot ?? null, to: plan.key },
     });
+    await this.bumpEntitlements(tx, organizationId);
     return { subscription: updated, plan };
   }
 
@@ -238,6 +257,7 @@ export class SubscriptionsService {
       targetId: updated.id,
       diff: { at_period_end: atPeriodEnd },
     });
+    await this.bumpEntitlements(tx, organizationId);
     return { subscription: updated, plan: current.plan };
   }
 
@@ -246,13 +266,19 @@ export class SubscriptionsService {
     if (!current.subscription.cancel_at_period_end) throw new SubscriptionNotFoundError("Subscription is not scheduled for cancellation");
     const updated = await this.subscriptions.update(tx, current.subscription.id, { cancel_at_period_end: false });
     await this.emit(tx, events.SUBSCRIPTION_RESUMED, updated, current.plan);
+    await this.bumpEntitlements(tx, organizationId);
     return { subscription: updated, plan: current.plan };
   }
 
   /** Webhook-driven status change (milestone 4 wires the callers); idempotent and transition-checked. */
   async applyProviderTransition(tx: Tx, subscription: SubscriptionRow, targetStatus: string, currentPeriodEnd?: Date): Promise<SubscriptionRow> {
     assertTransition(subscription.status, targetStatus);
-    return this.subscriptions.update(tx, subscription.id, { status: targetStatus, ...(currentPeriodEnd ? { current_period_end: currentPeriodEnd } : {}) });
+    const updated = await this.subscriptions.update(tx, subscription.id, {
+      status: targetStatus,
+      ...(currentPeriodEnd ? { current_period_end: currentPeriodEnd } : {}),
+    });
+    await this.bumpEntitlements(tx, subscription.organization_id);
+    return updated;
   }
 
   // ── Internals ───────────────────────────────────────────────────────────────

@@ -145,7 +145,7 @@ export class BillingWebhooksService {
       return;
     }
     await this.subscriptions.applyProviderTransition(tx, subscription, targetStatus, event.currentPeriodEnd ?? undefined);
-    this.entitlements.invalidate(organizationId);
+    await this.entitlements.invalidate(tx, organizationId);
     await this.outbox.append(tx, {
       eventType: events.SUBSCRIPTION_UPDATED,
       aggregateType: "subscription",

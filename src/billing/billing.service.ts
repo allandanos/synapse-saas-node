@@ -253,7 +253,7 @@ export class BillingService {
         });
       }
       const changed = await this.changePlanWithProvider(tx, organizationId, current, plan);
-      this.entitlements.invalidate(organizationId);
+      await this.entitlements.invalidate(tx, organizationId);
       return changed;
     }
 
@@ -270,7 +270,7 @@ export class BillingService {
       result = { subscription: updated, plan: result.plan };
       this.logger.log(`plan change prorated org=${organizationId} net_cents=${String(adjustment.amount_cents)} ${String(adjustment.from_plan)}→${String(adjustment.to_plan)}`);
     }
-    this.entitlements.invalidate(organizationId);
+    await this.entitlements.invalidate(tx, organizationId);
     return result;
   }
 

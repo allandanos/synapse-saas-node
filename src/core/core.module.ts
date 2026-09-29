@@ -2,6 +2,8 @@ import { Global, Inject, Module, type OnApplicationShutdown } from "@nestjs/comm
 import { DiscoveryModule } from "@nestjs/core";
 import { Pool, types } from "pg";
 import { AuditWriter } from "./audit";
+import { CACHE_BACKEND, CacheRegistry, createCacheBackend } from "./cache/cache.registry";
+import type { CacheBackend } from "./cache/backend";
 import { loadSettings, PG_POOL, SETTINGS, type Settings } from "./config";
 import { Database } from "./db/database";
 import { MigrationRunner } from "./db/migrations";
@@ -30,6 +32,8 @@ export function createPool(settings: Settings): Pool {
   providers: [
     { provide: SETTINGS, useFactory: () => loadSettings() },
     { provide: PG_POOL, inject: [SETTINGS], useFactory: createPool },
+    { provide: CACHE_BACKEND, inject: [SETTINGS], useFactory: createCacheBackend },
+    CacheRegistry,
     RequestContext,
     Database,
     MigrationRunner,
@@ -38,12 +42,16 @@ export function createPool(settings: Settings): Pool {
     AuditWriter,
     RouteTable,
   ],
-  exports: [SETTINGS, PG_POOL, RequestContext, Database, MigrationRunner, SecurityService, OutboxWriter, AuditWriter, RouteTable],
+  exports: [SETTINGS, PG_POOL, CACHE_BACKEND, CacheRegistry, RequestContext, Database, MigrationRunner, SecurityService, OutboxWriter, AuditWriter, RouteTable],
 })
 export class CoreModule implements OnApplicationShutdown {
-  constructor(@Inject(PG_POOL) private readonly pool: Pool) {}
+  constructor(
+    @Inject(PG_POOL) private readonly pool: Pool,
+    @Inject(CACHE_BACKEND) private readonly cache: CacheBackend,
+  ) {}
 
   async onApplicationShutdown(): Promise<void> {
+    await this.cache.close();
     await this.pool.end();
   }
 }

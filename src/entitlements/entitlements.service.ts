@@ -1,4 +1,6 @@
 import { Inject, Injectable } from "@nestjs/common";
+import { CACHE_NAMESPACES, CacheRegistry } from "../core/cache/cache.registry";
+import type { VersionedCache } from "../core/cache/versioned-cache";
 import { SETTINGS, type Settings } from "../core/config";
 import { Database, type Tx } from "../core/db/database";
 import { EntitlementNotFoundError, FeatureNotEntitledError } from "../core/errors";
@@ -7,7 +9,7 @@ import { OutboxWriter } from "../core/outbox";
 import { PlansRepository, type PlanWithDetails } from "../subscriptions/plans.repository";
 import { SubscriptionsRepository } from "../subscriptions/subscriptions.repository";
 import { type EntitlementRow, EntitlementsRepository } from "./entitlements.repository";
-import { type EffectiveEntitlements, type EntitlementGrant, Limit, Overage, resolveEffective } from "./resolver";
+import { EffectiveEntitlements, type EntitlementGrant, Limit, Overage, resolveEffective } from "./resolver";
 
 export const UPGRADE_URL = "/dashboard/billing";
 
@@ -15,13 +17,14 @@ export const UPGRADE_URL = "/dashboard/billing";
  * Assembles resolver inputs from the database and manages grants
  * (transliterated from the reference's `entitlements/service.py`).
  *
- * Caching seam: the reference memoises `effective_for_org` in a versioned
- * Redis cache bumped on every subscription/grant change. This port computes
- * the set per call (a few indexed reads inside the caller's transaction); a
- * cache slots in behind `effectiveForOrg` without touching callers.
+ * The resolution is memoised in the versioned `entl` cache (60 s) and bumped
+ * by every subscription, grant or webhook change — including from
+ * `SubscriptionsService` and `BillingService`, which hold the same namespace.
  */
 @Injectable()
 export class EntitlementsService {
+  private readonly cache: VersionedCache;
+
   constructor(
     @Inject(SETTINGS) private readonly settings: Settings,
     private readonly db: Database,
@@ -29,16 +32,19 @@ export class EntitlementsService {
     private readonly subscriptions: SubscriptionsRepository,
     private readonly entitlements: EntitlementsRepository,
     private readonly outbox: OutboxWriter,
-  ) {}
+    caches: CacheRegistry,
+  ) {
+    this.cache = caches.namespace(CACHE_NAMESPACES.ENTITLEMENTS);
+  }
 
-  /**
-   * Cache-invalidation seam. The reference bumps a versioned Redis key here
-   * (grants, plan changes, webhook transitions, expiry); this port resolves
-   * entitlements per call, so the seam is a no-op that keeps the call sites
-   * honest — a cache slots in behind it without touching any caller.
-   */
-  invalidate(_organizationId: string): void {
-    return;
+  /** Grants, plan changes and webhook transitions all land here. */
+  invalidate(tx: Tx, organizationId: string): Promise<void> {
+    return this.cache.invalidate(tx, organizationId);
+  }
+
+  /** Out-of-transaction invalidation: worker jobs, after their own commit. */
+  async invalidateAfterCommit(organizationId: string): Promise<void> {
+    await this.cache.bump(organizationId);
   }
 
   // ── Resolution ──────────────────────────────────────────────────────────────
@@ -48,6 +54,19 @@ export class EntitlementsService {
   }
 
   async effectiveForOrg(tx: Tx, organizationId: string): Promise<EffectiveEntitlements> {
+    const [cached, version] = await this.cache.getVersioned(organizationId);
+    if (cached !== null) {
+      const hit = deserializeEffective(cached);
+      if (hit) return hit; // a corrupt body just recomputes
+    }
+    const effective = await this.compute(tx, organizationId);
+    // Store under the version seen at READ time: a bump in between leaves the
+    // new version empty instead of filling it with this (now stale) body.
+    await this.cache.set(organizationId, serializeEffective(effective), version);
+    return effective;
+  }
+
+  private async compute(tx: Tx, organizationId: string): Promise<EffectiveEntitlements> {
     const subscription = await this.subscriptions.currentForOrganization(tx, organizationId);
     let plan: PlanWithDetails | undefined;
     if (subscription) {
@@ -141,7 +160,7 @@ export class EntitlementsService {
       organizationId,
       payload: { feature_key: input.featureKey, source: input.source, ends_at: endsAt ? endsAt.toISOString() : null, limit_value: input.limitValue ?? null },
     });
-    this.invalidate(organizationId);
+    await this.invalidate(tx, organizationId);
     return row;
   }
 
@@ -162,7 +181,53 @@ export class EntitlementsService {
       organizationId: row.organization_id,
       payload: { feature_key: row.feature_key },
     });
-    this.invalidate(row.organization_id);
+    await this.invalidate(tx, row.organization_id);
     return row;
+  }
+}
+
+// ── Cache body ───────────────────────────────────────────────────────────────
+
+/** The cached shape mirrors the reference's `_serialize` exactly. */
+function serializeEffective(effective: EffectiveEntitlements): string {
+  const limits: Record<string, unknown> = {};
+  for (const [metric, limit] of effective.limits) {
+    limits[metric] = {
+      value: limit.value,
+      soft_limit_ratio: limit.softLimitRatio,
+      overage: limit.overage ? { unit: limit.overage.unit, price_cents: limit.overage.priceCents } : null,
+    };
+  }
+  return JSON.stringify({
+    organization_id: effective.organizationId,
+    plan_key: effective.planKey,
+    subscription_status: effective.subscriptionStatus,
+    features: [...effective.features].sort(),
+    limits,
+  });
+}
+
+interface SerializedLimit {
+  value: number | null;
+  soft_limit_ratio: number | null;
+  overage: { unit: number; price_cents: number } | null;
+}
+
+function deserializeEffective(raw: string): EffectiveEntitlements | null {
+  try {
+    const data = JSON.parse(raw) as {
+      organization_id: string;
+      plan_key: string | null;
+      subscription_status: string | null;
+      features: string[];
+      limits: Record<string, SerializedLimit>;
+    };
+    const limits = new Map<string, Limit>();
+    for (const [metric, limit] of Object.entries(data.limits)) {
+      limits.set(metric, new Limit(limit.value, limit.soft_limit_ratio, limit.overage ? new Overage(limit.overage.unit, limit.overage.price_cents) : null));
+    }
+    return new EffectiveEntitlements(data.organization_id, data.plan_key, data.subscription_status, new Set(data.features), limits);
+  } catch {
+    return null;
   }
 }

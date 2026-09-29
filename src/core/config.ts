@@ -1,5 +1,6 @@
 import { resolve } from "node:path";
 import { z } from "zod";
+import { parseCidr } from "./ip";
 
 /**
  * The SYNAPSE_* settings — same names and values as the reference
@@ -34,6 +35,10 @@ const str = (fallback: string) => z.preprocess(emptyIsUndefined, z.string().defa
 
 /** The catalog shipped with the port (`config/plans.yaml`, verbatim from the reference); products point SYNAPSE_PLANS_FILE at their own. */
 export const DEFAULT_PLANS_FILE = resolve(__dirname, "..", "..", "config", "plans.yaml");
+
+/** Hard ceilings for production (the reference's `Settings.PRODUCTION_MAX_*`). */
+export const PRODUCTION_MAX_AUTH_PER_IP = 100;
+export const PRODUCTION_MAX_AUTH_PER_IDENTITY = 20;
 
 const schema = z.object({
   SYNAPSE_ENV: z.string().default("development"),
@@ -94,6 +99,47 @@ const schema = z.object({
   SYNAPSE_SEED_ON_START: bool.default(true),
   SYNAPSE_BOOTSTRAP_ADMIN_EMAIL: z.preprocess(emptyIsUndefined, z.string().email().optional()),
   SYNAPSE_BOOTSTRAP_ADMIN_PASSWORD: z.preprocess(emptyIsUndefined, z.string().min(10).optional()),
+  /**
+   * Shared cache / rate-limit store. Unset ⇒ every cache read misses and the
+   * rate limiter counts per process (documented degradation, never a 500).
+   * The reference defaults this to redis://localhost:6380/0; the port does
+   * not, so `pnpm test` and a bare `pnpm dev` need no container.
+   */
+  SYNAPSE_REDIS_URL: str(""),
+  /**
+   * Reverse proxies whose X-Forwarded-For chain we trust (CIDRs, CSV or JSON).
+   * Empty ⇒ the socket peer is the client and the header is ignored — a
+   * spoofed header must never bypass the per-IP auth rate limit.
+   */
+  SYNAPSE_TRUSTED_PROXIES: csv
+    .refine((list) => list.every((cidr) => parseCidr(cidr) !== null), {
+      message: "SYNAPSE_TRUSTED_PROXIES must be a list of CIDRs",
+    })
+    .default([]),
+  // ── Auth rate limiting ────────────────────────────────────────────────────
+  SYNAPSE_AUTH_RATE_LIMIT_PER_IP: positiveInt.default(20),
+  SYNAPSE_AUTH_RATE_LIMIT_PER_IDENTITY: positiveInt.default(5),
+  SYNAPSE_AUTH_RATE_WINDOW_SECONDS: positiveInt.default(60),
+  // ── Authorization backend (ADR 0009) ──────────────────────────────────────
+  // rbac: the Postgres role→permission tables (the default, always the source
+  // of truth). openfga: permission checks ask OpenFGA, tuples synced from RBAC.
+  SYNAPSE_AUTHZ_BACKEND: z.enum(["rbac", "openfga"]).default("rbac"),
+  SYNAPSE_OPENFGA_URL: str(""),
+  SYNAPSE_OPENFGA_STORE_ID: str(""),
+  /** Empty ⇒ the store's latest model. */
+  SYNAPSE_OPENFGA_MODEL_ID: str(""),
+  SYNAPSE_OPENFGA_API_TOKEN: str(""),
+  /** OpenFGA unreachable: `closed` denies (the production default), `rbac` falls back. */
+  SYNAPSE_OPENFGA_FAIL_MODE: z.enum(["closed", "rbac"]).default("closed"),
+  // ── OIDC (Keycloak, ADR 0010) ─────────────────────────────────────────────
+  SYNAPSE_KEYCLOAK_BASE_URL: str(""),
+  SYNAPSE_KEYCLOAK_REALM: str(""),
+  SYNAPSE_KEYCLOAK_CLIENT_ID: str(""),
+  SYNAPSE_KEYCLOAK_CLIENT_SECRET: str(""),
+  /** The resource-owner password grant is off by default: browser logins use the code flow. */
+  SYNAPSE_KEYCLOAK_ALLOW_PASSWORD_GRANT: bool.default(false),
+  /** The API's OIDC callback as Keycloak must see it; derived from the request when empty. */
+  SYNAPSE_OIDC_REDIRECT_URI: str(""),
   PORT: positiveInt.default(8080),
 });
 
@@ -116,8 +162,20 @@ export function loadSettings(env: NodeJS.ProcessEnv = process.env): Settings {
   };
   const raw = schema.parse(normalised);
   const isProduction = raw.SYNAPSE_ENV === "production";
-  if (isProduction && raw.SYNAPSE_SECRET_KEY.startsWith("dev-only-")) {
-    throw new Error("Refusing to start in production: SYNAPSE_SECRET_KEY is the dev default");
+  if (isProduction) {
+    // Dev and e2e raise the auth limits to register many users from one IP; a
+    // baked .env or a copy-pasted override must not reach production.
+    const problems: string[] = [];
+    if (raw.SYNAPSE_AUTH_RATE_LIMIT_PER_IP > PRODUCTION_MAX_AUTH_PER_IP) {
+      problems.push(`SYNAPSE_AUTH_RATE_LIMIT_PER_IP=${String(raw.SYNAPSE_AUTH_RATE_LIMIT_PER_IP)} exceeds the production ceiling of ${String(PRODUCTION_MAX_AUTH_PER_IP)}`);
+    }
+    if (raw.SYNAPSE_AUTH_RATE_LIMIT_PER_IDENTITY > PRODUCTION_MAX_AUTH_PER_IDENTITY) {
+      problems.push(
+        `SYNAPSE_AUTH_RATE_LIMIT_PER_IDENTITY=${String(raw.SYNAPSE_AUTH_RATE_LIMIT_PER_IDENTITY)} exceeds the production ceiling of ${String(PRODUCTION_MAX_AUTH_PER_IDENTITY)}`,
+      );
+    }
+    if (raw.SYNAPSE_SECRET_KEY.startsWith("dev-only-")) problems.push("SYNAPSE_SECRET_KEY is the dev default");
+    if (problems.length > 0) throw new Error(`Refusing to start in production: ${problems.join("; ")}`);
   }
   const corsOrigins = [...new Set([raw.SYNAPSE_WEB_ORIGIN, ...raw.SYNAPSE_WEB_ORIGINS])];
   return {

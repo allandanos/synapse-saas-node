@@ -14,11 +14,43 @@ import { RequestContext } from "../request-context";
  * the first tenant-scoped statement. Every binding is a no-op unless
  * SYNAPSE_TENANT_ISOLATION=app_and_rls.
  */
+/** What `Tx.deferBump` needs of a cache — kept structural so `core/db` never imports `core/cache`. */
+export interface Bumpable {
+  readonly namespace: string;
+  bump(key: string): Promise<number>;
+}
+
 export class Tx {
+  private readonly deferredBumps: { cache: Bumpable; key: string }[] = [];
+
   constructor(
     private readonly client: PoolClient,
     private readonly rlsEnabled: boolean,
   ) {}
+
+  /**
+   * Queue `cache.bump(key)` to run once this transaction has COMMITted.
+   *
+   * Bumping inside the transaction lets a concurrent reader recompute from
+   * the pre-commit rows and cache them under the NEW version — stale for a
+   * full TTL after the change. Deferring closes that window
+   * (`core/cache.py::defer_bump`). De-duplicated; dropped on rollback.
+   */
+  deferBump(cache: Bumpable, key: string): void {
+    if (this.deferredBumps.some((entry) => entry.cache === cache && entry.key === key)) return;
+    this.deferredBumps.push({ cache, key });
+  }
+
+  /** Run the queued bumps. `Database.transaction` calls this after COMMIT. */
+  async flushDeferredBumps(): Promise<number> {
+    const pending = this.deferredBumps.splice(0, this.deferredBumps.length);
+    for (const { cache, key } of pending) await cache.bump(key);
+    return pending.length;
+  }
+
+  discardDeferredBumps(): void {
+    this.deferredBumps.length = 0;
+  }
 
   query<R extends QueryResultRow = QueryResultRow>(text: string, params: unknown[] = []): Promise<QueryResult<R>> {
     return this.client.query<R>(text, params);
@@ -68,15 +100,20 @@ export class Database {
     const client = await this.pool.connect();
     const tx = new Tx(client, this.settings.rlsEnabled);
     let broken = false;
+    let committed = false;
     try {
       await client.query("BEGIN");
       await this.prime(tx);
       const result = await fn(tx);
       await client.query("COMMIT");
+      committed = true;
+      // Cache invalidation belongs after the commit, never inside it.
+      await tx.flushDeferredBumps();
       return result;
     } catch (error) {
+      tx.discardDeferredBumps();
       try {
-        await client.query("ROLLBACK");
+        if (!committed) await client.query("ROLLBACK");
       } catch {
         broken = true;
       }

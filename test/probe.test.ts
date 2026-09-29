@@ -4,6 +4,8 @@ import type { INestApplication } from "@nestjs/common";
 import request from "supertest";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ProbeController } from "../src/api/probe.controller";
+import { PassThroughBackend } from "../src/core/cache/backend";
+import { CACHE_BACKEND, CacheRegistry } from "../src/core/cache/cache.registry";
 import { loadSettings, SETTINGS } from "../src/core/config";
 import { Database } from "../src/core/db/database";
 
@@ -16,6 +18,8 @@ describe("probes + meta (no database)", () => {
       controllers: [ProbeController],
       providers: [
         { provide: SETTINGS, useValue: loadSettings({ SYNAPSE_TENANT_ISOLATION: "app_and_rls" }) },
+        { provide: CACHE_BACKEND, useValue: new PassThroughBackend() },
+        CacheRegistry,
         {
           provide: Database,
           useValue: {
