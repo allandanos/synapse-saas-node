@@ -3,6 +3,7 @@ import { Module } from "@nestjs/common";
 import { APP_FILTER, APP_PIPE } from "@nestjs/core";
 import type { Request, Response } from "express";
 import { ClsMiddlewareOptions, ClsModule, type ClsService } from "nestjs-cls";
+import { AgentsModule } from "./agents/agents.module";
 import { ApiKeysModule } from "./api-keys/api-keys.module";
 import { ProbeController } from "./api/probe.controller";
 import { AuthorizationModule } from "./authorization/authorization.module";
@@ -53,6 +54,7 @@ export const clsMiddlewareOptions: ClsMiddlewareOptions = {
     EntitlementsRoutesModule,
     UsageRoutesModule,
     BillingRoutesModule,
+    AgentsModule,
     WorkerModule,
   ],
   controllers: [ProbeController],

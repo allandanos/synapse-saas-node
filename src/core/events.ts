@@ -39,6 +39,17 @@ export const events = {
   INVOICE_CREATED: "invoice.created",
   INVOICE_PAID: "invoice.paid",
   INVOICE_FAILED: "invoice.failed",
+  // Agents (ADR 0007)
+  AGENT_REGISTERED: "agent.registered",
+  AGENT_UPDATED: "agent.updated",
+  AGENT_DISABLED: "agent.disabled",
+  // Files
+  FILE_UPLOADED: "file.uploaded",
+  FILE_DELETED: "file.deleted",
+  // Outbound webhook management
+  WEBHOOK_ENDPOINT_CREATED: "webhook.endpoint_created",
+  WEBHOOK_ENDPOINT_UPDATED: "webhook.endpoint_updated",
+  WEBHOOK_ENDPOINT_DELETED: "webhook.endpoint_deleted",
   // Usage
   USAGE_SOFT_LIMIT_REACHED: "usage.soft_limit_reached",
   USAGE_HARD_LIMIT_REACHED: "usage.hard_limit_reached",
