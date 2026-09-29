@@ -1,32 +1,29 @@
 import { Logger } from "@nestjs/common";
-import { createTransport, type Transporter } from "nodemailer";
+import { createTransport, type SendMailOptions, type Transporter } from "nodemailer";
 import type { Settings } from "../core/config";
 import { NoopNotifier } from "./noop.notifier";
 import type { Message, Notifier } from "./notifier";
 
 const CONNECTION_TIMEOUT_MS = 10_000;
 
-/** RFC 2045 base64 line length. */
-const BASE64_LINE_LENGTH = 76;
-
 /**
- * The attachment part, byte-for-byte as the reference emits it (Python's
- * `EmailMessage.add_attachment`): a bare `Content-Type`, base64, a *quoted*
- * filename, then `MIME-Version` — in that order. Recipients parse any valid
- * spelling, but the console's e2e journey matches this exact part, so nodemailer
- * gets the source verbatim instead of composing its own (`name=` parameter,
- * unquoted filename, no per-part MIME-Version).
+ * The nodemailer message for an outbound notification. Attachments go out with
+ * nodemailer's own MIME spelling — the contract is "a base64 application/pdf
+ * part named after the invoice", not one mail library's byte layout (the
+ * console's `pdfAttachmentBase64` fixture accepts any of them).
  */
-export function rawAttachmentPart(attachment: { filename: string; content: Buffer; contentType: string }): string {
-  const body = attachment.content
-    .toString("base64")
-    .replace(new RegExp(`(.{${String(BASE64_LINE_LENGTH)}})`, "g"), "$1\r\n");
-  return (
-    `Content-Type: ${attachment.contentType}\r\n` +
-    `Content-Transfer-Encoding: base64\r\n` +
-    `Content-Disposition: attachment; filename="${attachment.filename}"\r\n` +
-    `MIME-Version: 1.0\r\n\r\n${body}\r\n`
-  );
+export function toMailOptions(from: string, message: Message): SendMailOptions {
+  return {
+    from,
+    to: message.to,
+    subject: message.subject,
+    text: message.body,
+    attachments: (message.attachments ?? []).map((attachment) => ({
+      filename: attachment.filename,
+      content: attachment.content,
+      contentType: attachment.contentType,
+    })),
+  };
 }
 
 /**
@@ -49,13 +46,7 @@ export class SmtpNotifier implements Notifier {
       if (this.settings.SYNAPSE_SMTP_USERNAME && this.settings.SYNAPSE_SMTP_TLS === "none") {
         throw new Error("SMTP AUTH over a plaintext connection is refused; set SYNAPSE_SMTP_TLS");
       }
-      await this.transporter().sendMail({
-        from: this.settings.SYNAPSE_SMTP_FROM,
-        to: message.to,
-        subject: message.subject,
-        text: message.body,
-        attachments: (message.attachments ?? []).map((attachment) => ({ raw: rawAttachmentPart(attachment) })),
-      });
+      await this.transporter().sendMail(toMailOptions(this.settings.SYNAPSE_SMTP_FROM, message));
       this.logger.log(`email sent to=${message.to} subject=${JSON.stringify(message.subject)} attachments=${String(message.attachments?.length ?? 0)}`);
     } catch (error) {
       this.logger.warn(`email send failed to=${message.to} subject=${JSON.stringify(message.subject)}: ${error instanceof Error ? error.message : String(error)}`);

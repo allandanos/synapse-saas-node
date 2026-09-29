@@ -70,7 +70,7 @@ export class NotificationHandlers {
     const email = asString(payload.email);
     const token = asString(payload.token);
     if (!email || !token) return;
-    const link = this.webUrl(`/login?reset=${encodeURIComponent(token)}`); // the console routes to the reset form
+    const link = this.webUrl(`/reset-password?reset=${encodeURIComponent(token)}`); // the console's reset form reads ?reset=
     await this.notifier.send({
       to: email,
       subject: "Reset your password",

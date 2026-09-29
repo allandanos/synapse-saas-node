@@ -460,7 +460,8 @@ describeDb("milestone 4 billing + worker (real Postgres)", () => {
     const invite = sent.find((message) => message.subject.startsWith("You've been invited"));
     expect(invite?.body).toContain("/register?invite=");
     const reset = sent.find((message) => message.subject === "Reset your password");
-    expect(reset?.body).toContain("/login?reset=");
+    // The emailed link must land on the console's reset FORM, not the sign-in page.
+    expect(reset?.body).toContain("/reset-password?reset=");
   });
 
   it("maintains partitions and honours retention", async () => {
