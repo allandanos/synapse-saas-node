@@ -2,6 +2,7 @@ import { Inject, Injectable, Logger } from "@nestjs/common";
 import { SETTINGS, type Settings } from "../core/config";
 import { Database } from "../core/db/database";
 import { SecurityService } from "../core/security";
+import { EntitlementsService } from "../entitlements/entitlements.service";
 import { UsersRepository } from "../identity/users.repository";
 import { TenancyService } from "../tenancy/tenancy.service";
 
@@ -12,6 +13,9 @@ import { TenancyService } from "../tenancy/tenancy.service";
  * is a no-op when the owner already exists.
  */
 export const DEV_PASSWORD = "password123";
+
+/** The demo org's `users` limit grant — the free plan ships 3 seats, the seed needs 5. */
+export const DEV_SEAT_LIMIT = 10;
 
 export const DEV_ORG_NAME = "Acme Corporation";
 export const DEV_ORG_SLUG = "acme";
@@ -46,6 +50,7 @@ export class DevSeeder {
     private readonly security: SecurityService,
     private readonly users: UsersRepository,
     private readonly tenancy: TenancyService,
+    private readonly entitlements: EntitlementsService,
   ) {}
 
   /** Idempotent: the owner's presence is the marker, exactly like the reference. */
@@ -75,6 +80,18 @@ export class DevSeeder {
       await this.tenancy.inviteMember({ organizationId: org.id, email, roleKeys: [roleKey], organizationName: org.name, enforceSeatLimit: false });
       await this.tenancy.acceptInviteByEmail(org.id, { userId: user.id, email });
     }
+
+    // Five demo users on a free plan (3 seats) would show an over-quota seat
+    // meter out of the box; grant the seats the way an operator would.
+    await this.db.transaction((tx) =>
+      this.entitlements.grant(tx, org.id, {
+        featureKey: "limit:users",
+        source: "override", // operator-style grant (the allowed sources are constrained)
+        limitValue: DEV_SEAT_LIMIT,
+        note: "dev seed: one demo user per system role",
+        createdByUserId: owner.id,
+      }),
+    );
 
     this.logger.log(`dev seeded: org ${org.slug}, roles ${DEV_ROLE_USERS.map(([, role]) => role).join(", ")}`);
     return "seeded";

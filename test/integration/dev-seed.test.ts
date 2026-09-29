@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Database } from "../../src/core/db/database";
-import { DEV_ORG_SLUG, DEV_OWNER_EMAIL, DEV_PASSWORD, DEV_ROLE_USERS, DevSeeder } from "../../src/seeds/dev-seed";
+import { DEV_ORG_SLUG, DEV_OWNER_EMAIL, DEV_PASSWORD, DEV_ROLE_USERS, DEV_SEAT_LIMIT, DevSeeder } from "../../src/seeds/dev-seed";
 import { type Harness, startHarness, stopHarness, TEST_DB } from "./harness";
 
 /**
@@ -76,8 +76,19 @@ maybe("dev seed", () => {
     expect(subscription.status, subscription.text).toBe(200);
     expect(subscription.body.subscription.plan.key).toBe("free");
     expect(subscription.body.subscription.status).toBe("active");
-    // The seat gauge the create-org path sets: the owner, before any invite.
-    expect(subscription.body.entitlements.limits.users.value).toBe(3);
+  });
+
+  it("grants the demo org its seats — five users would not fit the free plan's three", async () => {
+    const login = await h.http.post("/v1/auth/login").send({ email: DEV_OWNER_EMAIL, password: DEV_PASSWORD });
+    const bearer = { Authorization: `Bearer ${String(login.body.tokens.access_token)}` };
+    const me = await h.http.get("/v1/auth/me").set(bearer);
+    const orgId = (me.body.orgs as { id: string }[])[0].id;
+
+    const entitlements = await h.http.get("/v1/entitlements").set({ ...bearer, "X-Org-Id": orgId });
+    expect(entitlements.status, entitlements.text).toBe(200);
+    const seats = entitlements.body.limits.users.value as number;
+    expect(seats).toBe(DEV_SEAT_LIMIT);
+    expect(seats).toBeGreaterThanOrEqual(DEV_ROLE_USERS.length);
   });
 
   it("is idempotent — a second run is a no-op", async () => {
