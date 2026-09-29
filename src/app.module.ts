@@ -12,6 +12,7 @@ import { BillingRoutesModule } from "./billing/billing-routes.module";
 import { RolesModule } from "./authorization/roles.module";
 import { CoreModule } from "./core/core.module";
 import { EntitlementsRoutesModule } from "./entitlements/entitlements-routes.module";
+import { FeatureFlagsModule } from "./feature-flags/feature-flags.module";
 import { ProblemFilter } from "./core/problem.filter";
 import { ProblemValidationPipe } from "./core/validation";
 import { IdentityModule } from "./identity/identity.module";
@@ -57,6 +58,7 @@ export const clsMiddlewareOptions: ClsMiddlewareOptions = {
     BillingRoutesModule,
     AgentsModule,
     AuditRoutesModule,
+    FeatureFlagsModule,
     WorkerModule,
   ],
   controllers: [ProbeController],

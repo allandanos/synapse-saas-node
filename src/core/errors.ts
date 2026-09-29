@@ -121,6 +121,22 @@ export const BillingProviderError = define(502, "billing_provider_error");
 export const WebhookSignatureInvalidError = define(400, "webhook_signature_invalid");
 export const InvoiceNotFoundError = define(404, "invoice_not_found");
 
+// ── Feature flags ──────────────────────────────────────────────────────────────
+/** Unknown, archived, or scope-less flag on the management surface. */
+export const FeatureFlagNotFoundError = define(404, "feature_flag_not_found");
+
+// ── Storage ────────────────────────────────────────────────────────────────────
+/** Malformed key, wrong content type, oversized direct upload, backend failure. */
+export const StorageError = define(400, "storage_error");
+/** The configured backend cannot hand out direct URLs (local disk). */
+export const PresignUnsupportedError = define(409, "presign_unsupported");
+/** `complete` was called but the object is missing or its size does not match the reservation. */
+export const UploadIncompleteError = define(409, "upload_incomplete");
+
+// ── Outbound webhooks ──────────────────────────────────────────────────────────
+export const WebhookEndpointNotFoundError = define(404, "webhook_endpoint_not_found");
+export const WebhookDeliveryNotFoundError = define(404, "webhook_delivery_not_found");
+
 // ── Misc ───────────────────────────────────────────────────────────────────────
 export const NotFoundError = define(404, "not_found");
 export const MethodNotAllowedError = define(405, "method_not_allowed");
