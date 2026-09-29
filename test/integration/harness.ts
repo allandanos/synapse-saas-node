@@ -50,6 +50,9 @@ export async function startHarness(): Promise<Harness> {
   process.env.SYNAPSE_BOOTSTRAP_ADMIN_EMAIL = ADMIN_EMAIL;
   process.env.SYNAPSE_BOOTSTRAP_ADMIN_PASSWORD = ADMIN_PASSWORD;
   process.env.SYNAPSE_TENANT_ISOLATION = process.env.SYNAPSE_TEST_TENANT_ISOLATION ?? "app";
+  // The journeys drive `JobsService` explicitly; the in-process cadence would
+  // otherwise race them (and keep timers alive past the suite).
+  process.env.SYNAPSE_WORKER_ENABLED = "false";
   const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
   const app = moduleRef.createNestApplication<NestExpressApplication>({ bodyParser: false });
   configureHttp(app, app.get<Settings>(SETTINGS));

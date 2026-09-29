@@ -5,6 +5,7 @@ import { MigrationRunner } from "../core/db/migrations";
 
 /** `pnpm migrate` — apply pending `migrations/*.sql` and exit. */
 async function main(): Promise<void> {
+  process.env.SYNAPSE_WORKER_ENABLED = "false"; // a one-shot command never holds the job cadence
   const app = await NestFactory.createApplicationContext(AppModule, { logger: ["log", "warn", "error"] });
   try {
     const applied = await app.get(MigrationRunner).run();

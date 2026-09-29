@@ -15,16 +15,19 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "start": "node dist/main.js",
-    "dev": "tsx watch src/main.ts",
-    "migrate": "tsx src/cli/migrate.ts",
-    "seed": "tsx src/cli/seed.ts",
-    "plans:sync": "tsx src/cli/plans-sync.ts",
+    "dev": "node -r @swc-node/register --watch src/main.ts",
+    "migrate": "node -r @swc-node/register src/cli/migrate.ts",
+    "seed": "node -r @swc-node/register src/cli/seed.ts",
+    "plans:sync": "node -r @swc-node/register src/cli/plans-sync.ts",
+    "jobs:run-once": "node -r @swc-node/register src/cli/jobs-run-once.ts",
+    "worker": "node -r @swc-node/register src/worker/worker.ts",
     "test": "vitest run",
     "test:db": "SYNAPSE_TEST_DATABASE_URL=${SYNAPSE_TEST_DATABASE_URL:-postgresql://synapse:synapse@localhost:5434/synapse_node_test} vitest run",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "conformance": "cd ../synapse-saas && SYNAPSE_CONFORMANCE_API_URL=${SYNAPSE_CONFORMANCE_API_URL:-http://localhost:8090} uv run pytest tests/conformance -m '' --no-cov -q -p no:cacheprovider",
     "conformance:m2": "cd ../synapse-saas && SYNAPSE_CONFORMANCE_API_URL=${SYNAPSE_CONFORMANCE_API_URL:-http://localhost:8090} uv run pytest tests/conformance/test_meta_and_health.py tests/conformance/test_problem_documents.py tests/conformance/test_auth.py tests/conformance/test_tenancy.py tests/conformance/test_authorization.py tests/conformance/test_api_keys.py -m '' --no-cov -q -p no:cacheprovider",
-    "conformance:m3": "cd ../synapse-saas && SYNAPSE_CONFORMANCE_API_URL=${SYNAPSE_CONFORMANCE_API_URL:-http://localhost:8090} uv run pytest tests/conformance/test_meta_and_health.py tests/conformance/test_problem_documents.py tests/conformance/test_auth.py tests/conformance/test_tenancy.py tests/conformance/test_authorization.py tests/conformance/test_api_keys.py tests/conformance/test_subscriptions.py tests/conformance/test_usage_and_entitlements.py -m '' --no-cov -q -p no:cacheprovider"
+    "conformance:m3": "cd ../synapse-saas && SYNAPSE_CONFORMANCE_API_URL=${SYNAPSE_CONFORMANCE_API_URL:-http://localhost:8090} uv run pytest tests/conformance/test_meta_and_health.py tests/conformance/test_problem_documents.py tests/conformance/test_auth.py tests/conformance/test_tenancy.py tests/conformance/test_authorization.py tests/conformance/test_api_keys.py tests/conformance/test_subscriptions.py tests/conformance/test_usage_and_entitlements.py -m '' --no-cov -q -p no:cacheprovider",
+    "conformance:m4": "cd ../synapse-saas && SYNAPSE_CONFORMANCE_API_URL=${SYNAPSE_CONFORMANCE_API_URL:-http://localhost:8090} uv run pytest tests/conformance/test_meta_and_health.py tests/conformance/test_problem_documents.py tests/conformance/test_auth.py tests/conformance/test_tenancy.py tests/conformance/test_authorization.py tests/conformance/test_api_keys.py tests/conformance/test_subscriptions.py tests/conformance/test_usage_and_entitlements.py tests/conformance/test_billing.py -m '' --no-cov -q -p no:cacheprovider"
   },
   "dependencies": {
     "@nestjs/common": "^11.0.0",
@@ -48,6 +51,7 @@
   },
   "devDependencies": {
     "@nestjs/testing": "^11.0.0",
+    "@swc-node/register": "^1.12.1",
     "@swc/core": "^1.16.2",
     "@types/cookie-parser": "^1.4.10",
     "@types/express": "^5.0.0",

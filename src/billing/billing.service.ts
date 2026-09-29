@@ -9,6 +9,7 @@ import type { PlanWithDetails } from "../subscriptions/plans.repository";
 import { arrearsAdjustmentCents, prorate } from "../subscriptions/proration";
 import { SubscriptionsRepository, type SubscriptionRow } from "../subscriptions/subscriptions.repository";
 import { SubscriptionsService, type SubscriptionWithPlan } from "../subscriptions/subscriptions.service";
+import { EntitlementsService } from "../entitlements/entitlements.service";
 import { OrganizationsRepository, type OrganizationRow } from "../tenancy/organizations.repository";
 import { type BillingCustomerRow, BillingCustomersRepository } from "./billing-customers.repository";
 import { InvoicesRepository } from "./invoicing/invoices.repository";
@@ -77,6 +78,7 @@ export class BillingService {
     private readonly customers: BillingCustomersRepository,
     private readonly organizations: OrganizationsRepository,
     private readonly invoices: InvoicesRepository,
+    private readonly entitlements: EntitlementsService,
     private readonly outbox: OutboxWriter,
     private readonly context: RequestContext,
   ) {}
@@ -250,7 +252,9 @@ export class BillingService {
           checkout_url: "/v1/billing/checkout",
         });
       }
-      return this.changePlanWithProvider(tx, organizationId, current, plan);
+      const changed = await this.changePlanWithProvider(tx, organizationId, current, plan);
+      this.entitlements.invalidate(organizationId);
+      return changed;
     }
 
     const previous = periodSnapshot(current);
@@ -266,6 +270,7 @@ export class BillingService {
       result = { subscription: updated, plan: result.plan };
       this.logger.log(`plan change prorated org=${organizationId} net_cents=${String(adjustment.amount_cents)} ${String(adjustment.from_plan)}→${String(adjustment.to_plan)}`);
     }
+    this.entitlements.invalidate(organizationId);
     return result;
   }
 

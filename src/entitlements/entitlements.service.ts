@@ -31,6 +31,16 @@ export class EntitlementsService {
     private readonly outbox: OutboxWriter,
   ) {}
 
+  /**
+   * Cache-invalidation seam. The reference bumps a versioned Redis key here
+   * (grants, plan changes, webhook transitions, expiry); this port resolves
+   * entitlements per call, so the seam is a no-op that keeps the call sites
+   * honest — a cache slots in behind it without touching any caller.
+   */
+  invalidate(_organizationId: string): void {
+    return;
+  }
+
   // ── Resolution ──────────────────────────────────────────────────────────────
 
   effectiveForOrganization(organizationId: string): Promise<EffectiveEntitlements> {
@@ -131,6 +141,7 @@ export class EntitlementsService {
       organizationId,
       payload: { feature_key: input.featureKey, source: input.source, ends_at: endsAt ? endsAt.toISOString() : null, limit_value: input.limitValue ?? null },
     });
+    this.invalidate(organizationId);
     return row;
   }
 
@@ -151,6 +162,7 @@ export class EntitlementsService {
       organizationId: row.organization_id,
       payload: { feature_key: row.feature_key },
     });
+    this.invalidate(row.organization_id);
     return row;
   }
 }

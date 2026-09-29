@@ -3,6 +3,7 @@ import { Database, type Tx } from "../../core/db/database";
 import { DomainError } from "../../core/errors";
 import { events } from "../../core/events";
 import { OutboxWriter } from "../../core/outbox";
+import { EntitlementsService } from "../../entitlements/entitlements.service";
 import { SubscriptionsRepository } from "../../subscriptions/subscriptions.repository";
 import { SubscriptionsService } from "../../subscriptions/subscriptions.service";
 import { BillingCustomersRepository } from "../billing-customers.repository";
@@ -44,6 +45,7 @@ export class BillingWebhooksService {
     private readonly subscriptionRows: SubscriptionsRepository,
     private readonly customers: BillingCustomersRepository,
     private readonly invoices: InvoicesRepository,
+    private readonly entitlements: EntitlementsService,
     private readonly outbox: OutboxWriter,
   ) {}
 
@@ -143,6 +145,7 @@ export class BillingWebhooksService {
       return;
     }
     await this.subscriptions.applyProviderTransition(tx, subscription, targetStatus, event.currentPeriodEnd ?? undefined);
+    this.entitlements.invalidate(organizationId);
     await this.outbox.append(tx, {
       eventType: events.SUBSCRIPTION_UPDATED,
       aggregateType: "subscription",

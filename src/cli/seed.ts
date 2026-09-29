@@ -7,6 +7,7 @@ import { PlanCatalogSync } from "../subscriptions/catalog-sync";
 
 /** `pnpm seed` — permission catalog + system roles (idempotent), the plan catalog, and the bootstrap platform admin. */
 async function main(): Promise<void> {
+  process.env.SYNAPSE_WORKER_ENABLED = "false"; // a one-shot command never holds the job cadence
   const app = await NestFactory.createApplicationContext(AppModule, { logger: ["log", "warn", "error"] });
   try {
     const summary = await app.get(SystemSeeder).seed();
