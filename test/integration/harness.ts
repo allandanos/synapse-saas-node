@@ -1,5 +1,7 @@
 import "reflect-metadata";
 import http from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { NestExpressApplication } from "@nestjs/platform-express";
 import { Test } from "@nestjs/testing";
 import { Pool } from "pg";
@@ -50,6 +52,8 @@ export async function startHarness(): Promise<Harness> {
   process.env.SYNAPSE_BOOTSTRAP_ADMIN_EMAIL = ADMIN_EMAIL;
   process.env.SYNAPSE_BOOTSTRAP_ADMIN_PASSWORD = ADMIN_PASSWORD;
   process.env.SYNAPSE_TENANT_ISOLATION = process.env.SYNAPSE_TEST_TENANT_ISOLATION ?? "app";
+  // File journeys write real bytes; keep them out of the working tree.
+  process.env.SYNAPSE_STORAGE_ROOT = process.env.SYNAPSE_STORAGE_ROOT ?? join(tmpdir(), `synapse-node-storage-${String(process.pid)}`);
   // The journeys drive `JobsService` explicitly; the in-process cadence would
   // otherwise race them (and keep timers alive past the suite).
   process.env.SYNAPSE_WORKER_ENABLED = "false";

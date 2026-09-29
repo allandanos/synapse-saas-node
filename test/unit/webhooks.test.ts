@@ -5,6 +5,9 @@ import { verifySignature } from "../../src/core/security";
 import { buildEnvelope, DELIVERY_BACKOFF_SECONDS, deliveryBackoffSeconds, MAX_DELIVERY_ATTEMPTS } from "../../src/webhooks/envelope";
 import { fernetDecrypt, fernetEncrypt, FernetError } from "../../src/webhooks/fernet";
 import { signatureHeader } from "../../src/webhooks/signer";
+import { toEndpointRead } from "../../src/webhooks/endpoints.repository";
+import { normaliseHttpUrl } from "../../src/webhooks/webhooks.dto";
+import { mintEndpointSecret } from "../../src/webhooks/webhooks.service";
 import { OUTBOX_BACKOFF_SECONDS, OUTBOX_MAX_ATTEMPTS } from "../../src/worker/outbox.repository";
 import { selectJobs } from "../../src/cli/jobs-run-once";
 import { JOB_NAMES } from "../../src/worker/jobs.service";
@@ -83,5 +86,41 @@ describe("jobs run-once selection", () => {
     expect(selectJobs(["rollup_usage", "purge_expired"]).jobs).toEqual(["rollup_usage", "purge_expired"]);
     expect(selectJobs([]).error).toMatch(/Name at least one job/);
     expect(selectJobs(["nope"]).error).toMatch(/Unknown job\(s\): nope/);
+  });
+});
+
+describe("endpoint reads and secrets", () => {
+  it("mints a whsec_ secret with the reference's entropy and alphabet", () => {
+    const secret = mintEndpointSecret();
+    expect(secret).toMatch(/^whsec_[A-Za-z0-9_-]{32}$/); // 24 bytes, url-safe base64
+    expect(mintEndpointSecret()).not.toBe(secret);
+  });
+
+  it("never carries the secret into an endpoint read", () => {
+    const row = {
+      id: "e1",
+      organization_id: "o1",
+      url: "https://hooks.example.com/x",
+      secret_encrypted: fernetEncrypt("whsec_top_secret", DEV_SECRET_KEY),
+      description: "d",
+      events: ["invoice.paid"],
+      is_active: true,
+      created_at: new Date("2026-09-29T10:00:00.000Z"),
+    };
+    const read = toEndpointRead(row);
+    expect(Object.keys(read).sort()).toEqual(["created_at", "description", "events", "id", "is_active", "url"]);
+    expect(JSON.stringify(read)).not.toContain("secret");
+  });
+
+  it("accepts the URLs pydantic's HttpUrl accepts and normalises them the same way", () => {
+    expect(normaliseHttpUrl("https://hooks.example.com")).toBe("https://hooks.example.com/");
+    expect(normaliseHttpUrl("https://Hooks.Example.com/Path")).toBe("https://hooks.example.com/Path");
+    expect(normaliseHttpUrl("http://localhost:9000/hook")).toBe("http://localhost:9000/hook");
+  });
+
+  it("refuses what HttpUrl refuses — relative, scheme-less and non-http URLs", () => {
+    for (const bad of ["not a url", "", "/hooks", "hooks.example.com", "ftp://host/x", "javascript:alert(1)"]) {
+      expect(normaliseHttpUrl(bad), bad).toBeNull();
+    }
   });
 });

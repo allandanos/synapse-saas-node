@@ -19,7 +19,7 @@ export class LocalDiskStorage implements StorageBackend {
     return path;
   }
 
-  async put(key: string, data: Buffer): Promise<string> {
+  async put(key: string, data: Buffer, _contentType?: string): Promise<string> {
     const path = this.pathFor(key);
     await mkdir(dirname(path), { recursive: true });
     await writeFile(path, data);
@@ -44,7 +44,7 @@ export class LocalDiskStorage implements StorageBackend {
     return Promise.reject(new StorageError("Presigned URLs require an S3-compatible backend"));
   }
 
-  presignPut(key: string): Promise<string> {
+  presignPut(key: string, _contentType?: string): Promise<string> {
     this.pathFor(key);
     return Promise.reject(new StorageError("Presigned URLs require an S3-compatible backend"));
   }

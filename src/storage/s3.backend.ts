@@ -28,6 +28,10 @@ export class S3Storage implements StorageBackend {
     if (!options.bucket) throw new StorageError("SYNAPSE_S3_BUCKET is not configured");
     this.client = new S3Client({
       region: options.region,
+      // v3 otherwise attaches a CRC32 of the body to every request, which for
+      // a presigned PUT is the checksum of an EMPTY body — the client's real
+      // upload would then be rejected. Checksums stay on where S3 needs them.
+      requestChecksumCalculation: "WHEN_REQUIRED",
       // A custom endpoint means MinIO/R2, which serve path-style buckets.
       ...(options.endpoint ? { endpoint: options.endpoint, forcePathStyle: true } : {}),
       ...(options.accessKeyId && options.secretAccessKey
@@ -64,10 +68,16 @@ export class S3Storage implements StorageBackend {
     return getSignedUrl(this.client, new GetObjectCommand({ Bucket: this.options.bucket, Key: key }), { expiresIn: this.options.presignSeconds });
   }
 
+  /**
+   * `content-type` is explicitly signable so the URL commits the client to the
+   * type it declared — boto3 signs it too, and `presign-upload` hands the
+   * header back in the response for exactly that reason.
+   */
   presignPut(key: string, contentType: string): Promise<string> {
     validateKey(key);
     return getSignedUrl(this.client, new PutObjectCommand({ Bucket: this.options.bucket, Key: key, ContentType: contentType }), {
       expiresIn: this.options.presignSeconds,
+      signableHeaders: new Set(["content-type"]),
     });
   }
 
