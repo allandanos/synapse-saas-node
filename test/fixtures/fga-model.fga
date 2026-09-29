@@ -1,0 +1,39 @@
+model
+  schema 1.1
+
+type user
+
+type organization
+  relations
+    define owner: [user]
+    define admin: [user]
+    define billing: [user]
+    define developer: [user]
+    define member: [user]
+    define can_org_read: [user] or owner or admin or billing or developer or member
+    define can_org_update: [user] or owner or admin
+    define can_org_delete: [user] or owner
+    define can_member_read: [user] or owner or admin or developer
+    define can_member_invite: [user] or owner or admin
+    define can_member_update: [user] or owner or admin
+    define can_member_remove: [user] or owner or admin
+    define can_role_manage: [user] or owner or admin
+    define can_billing_read: [user] or owner or admin or billing
+    define can_billing_manage: [user] or owner or admin or billing
+    define can_usage_read: [user] or owner or admin or billing or developer
+    define can_audit_read: [user] or owner or admin
+    define can_webhook_manage: [user] or owner or admin or developer
+    define can_entitlement_manage: [user]
+    define can_apikey_manage: [user] or owner or admin or developer
+    define can_file_read: [user] or owner or admin
+    define can_file_write: [user] or owner or admin
+    define can_project_read: [user] or owner or admin or developer or member
+    define can_project_manage: [user] or owner or admin or developer
+    define can_agents_read: [user] or owner or admin or developer
+    define can_agents_manage: [user] or owner or admin
+
+type project
+  relations
+    define org: [organization]
+    define viewer: [user] or editor or can_project_read from org
+    define editor: [user] or can_project_manage from org

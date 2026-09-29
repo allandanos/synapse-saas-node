@@ -21,6 +21,7 @@
     "seed:dev": "node -r @swc-node/register src/cli/seed-dev.ts",
     "e2e:console": "bash scripts/e2e-console.sh",
     "plans:sync": "node -r @swc-node/register src/cli/plans-sync.ts",
+    "authz:fga": "node -r @swc-node/register src/cli/authz-fga.ts",
     "jobs:run-once": "node -r @swc-node/register src/cli/jobs-run-once.ts",
     "worker": "node -r @swc-node/register src/worker/worker.ts",
     "test": "vitest run",

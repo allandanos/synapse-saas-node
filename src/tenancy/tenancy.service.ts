@@ -77,6 +77,11 @@ export class TenancyService {
       });
       await this.syncSeatGauge(tx, org.id);
       await this.attachRole(tx, membershipId, org.id, SYSTEM_ROLE_OWNER);
+      // The owner must be able to act on the org they just created. The
+      // reference never syncs tuples here (`tenancy/service.py::create_organization`),
+      // which leaves an openfga-backed deployment denying its own owner until
+      // `authz fga sync` runs — see docs/plans/milestone-7.md.
+      await this.authz.invalidateUserPerms(tx, input.ownerUserId, org.id);
 
       await this.audit.log(tx, {
         eventType: events.ORG_CREATED,

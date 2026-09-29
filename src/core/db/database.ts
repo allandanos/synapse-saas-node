@@ -1,4 +1,4 @@
-import { Inject, Injectable } from "@nestjs/common";
+import { Inject, Injectable, Logger } from "@nestjs/common";
 import type { Pool, PoolClient, QueryResult, QueryResultRow } from "pg";
 import { PG_POOL, SETTINGS, type Settings } from "../config";
 import { RequestContext } from "../request-context";
@@ -21,7 +21,7 @@ export interface Bumpable {
 }
 
 export class Tx {
-  private readonly deferredBumps: { cache: Bumpable; key: string }[] = [];
+  private readonly postCommit: { key: string; run: () => Promise<unknown> }[] = [];
 
   constructor(
     private readonly client: PoolClient,
@@ -37,19 +37,34 @@ export class Tx {
    * (`core/cache.py::defer_bump`). De-duplicated; dropped on rollback.
    */
   deferBump(cache: Bumpable, key: string): void {
-    if (this.deferredBumps.some((entry) => entry.cache === cache && entry.key === key)) return;
-    this.deferredBumps.push({ cache, key });
+    this.afterCommit(`bump:${cache.namespace}:${key}`, () => cache.bump(key));
   }
 
-  /** Run the queued bumps. `Database.transaction` calls this after COMMIT. */
-  async flushDeferredBumps(): Promise<number> {
-    const pending = this.deferredBumps.splice(0, this.deferredBumps.length);
-    for (const { cache, key } of pending) await cache.bump(key);
+  /**
+   * Queue any other side effect that must not happen until the rows are
+   * durable. De-duplicated by `key`; dropped on rollback; a failure is the
+   * caller's to survive (it is logged, never rethrown).
+   */
+  afterCommit(key: string, run: () => Promise<unknown>): void {
+    if (this.postCommit.some((entry) => entry.key === key)) return;
+    this.postCommit.push({ key, run });
+  }
+
+  /** Run the queued side effects. `Database.transaction` calls this after COMMIT. */
+  async flushPostCommit(onError?: (key: string, error: unknown) => void): Promise<number> {
+    const pending = this.postCommit.splice(0, this.postCommit.length);
+    for (const { key, run } of pending) {
+      try {
+        await run();
+      } catch (error) {
+        onError?.(key, error);
+      }
+    }
     return pending.length;
   }
 
-  discardDeferredBumps(): void {
-    this.deferredBumps.length = 0;
+  discardPostCommit(): void {
+    this.postCommit.length = 0;
   }
 
   query<R extends QueryResultRow = QueryResultRow>(text: string, params: unknown[] = []): Promise<QueryResult<R>> {
@@ -89,6 +104,8 @@ export class RoleIsolationMismatchError extends Error {}
 
 @Injectable()
 export class Database {
+  private readonly logger = new Logger(Database.name);
+
   constructor(
     @Inject(PG_POOL) private readonly pool: Pool,
     @Inject(SETTINGS) private readonly settings: Settings,
@@ -107,11 +124,14 @@ export class Database {
       const result = await fn(tx);
       await client.query("COMMIT");
       committed = true;
-      // Cache invalidation belongs after the commit, never inside it.
-      await tx.flushDeferredBumps();
+      // Cache invalidation (and any other post-commit effect) belongs after
+      // the commit, never inside it.
+      await tx.flushPostCommit((key, error) => {
+        this.logger.warn(`post-commit action failed (${key}): ${error instanceof Error ? error.message : String(error)}`);
+      });
       return result;
     } catch (error) {
-      tx.discardDeferredBumps();
+      tx.discardPostCommit();
       try {
         if (!committed) await client.query("ROLLBACK");
       } catch {

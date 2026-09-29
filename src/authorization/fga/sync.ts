@@ -97,7 +97,19 @@ export class FgaSyncService {
     return this.settings.SYNAPSE_AUTHZ_BACKEND === "openfga";
   }
 
-  /** Record that this member's tuples must be recomputed (a no-op without OpenFGA). */
+  /**
+   * Record that this member's tuples must be recomputed (a no-op without
+   * OpenFGA).
+   *
+   * Two paths, and both matter. The outbox event is the guarantee: the
+   * worker's consumer replays it with retries and dead-lettering, so an
+   * OpenFGA outage delays the sync instead of losing it. The post-commit
+   * attempt is the latency fix: the contract says the owner of a brand-new
+   * org can list its members on the very next request, and an owner whose
+   * tuples arrive 5 s later (the outbox cadence) would be denied until then.
+   * It runs AFTER the commit, so a slow or dead store costs a log line, never
+   * the request's success — the event is already durable.
+   */
   async queue(tx: Tx, organizationId: string, userId: string | null): Promise<void> {
     if (userId === null || !this.enabled) return;
     await this.outbox.append(tx, {
@@ -107,6 +119,7 @@ export class FgaSyncService {
       organizationId,
       payload: { organization_id: organizationId, user_id: userId },
     });
+    tx.afterCommit(`fga:${organizationId}:${userId}`, () => this.apply(organizationId, userId));
   }
 
   /** Outbox consumer entry point (internal audience); a no-op on the rbac backend. */

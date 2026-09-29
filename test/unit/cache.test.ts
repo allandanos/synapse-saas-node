@@ -1,41 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { RedisBackend } from "../../src/core/cache/redis.backend";
+import { MapCacheBackend } from "../support/map-cache-backend";
 import type { CacheBackend } from "../../src/core/cache/backend";
 import { PassThroughBackend } from "../../src/core/cache/backend";
 import { VersionedCache } from "../../src/core/cache/versioned-cache";
-
-/** An in-test stand-in for Redis: the reference's `TTLDictBackend`, minus the clock. */
-class MapBackend implements CacheBackend {
-  readonly configured = true;
-  readonly store = new Map<string, string>();
-
-  get(key: string): Promise<string | null> {
-    return Promise.resolve(this.store.get(key) ?? null);
-  }
-
-  set(key: string, value: string): Promise<void> {
-    this.store.set(key, value);
-    return Promise.resolve();
-  }
-
-  incr(key: string): Promise<number> {
-    const next = Number(this.store.get(key) ?? "0") + 1;
-    this.store.set(key, String(next));
-    return Promise.resolve(next);
-  }
-
-  incrWindow(): Promise<[number, number]> {
-    throw new Error("not used");
-  }
-
-  ping(): Promise<void> {
-    return Promise.resolve();
-  }
-
-  close(): Promise<void> {
-    return Promise.resolve();
-  }
-}
 
 /** Stands in for `Tx` — only `deferBump` matters here. */
 class FakeTx {
@@ -57,7 +25,7 @@ const cacheOn = (backend: CacheBackend, ns = "t"): VersionedCache => new Version
 
 describe("VersionedCache — version at read", () => {
   it("set uses the version seen at read, so a bump between leaves the new version empty", async () => {
-    const cache = cacheOn(new MapBackend());
+    const cache = cacheOn(new MapCacheBackend());
     const [body, version] = await cache.getVersioned("k");
     expect(body).toBeNull();
     expect(version).toBe(0);
@@ -70,14 +38,14 @@ describe("VersionedCache — version at read", () => {
   });
 
   it("set without a version reads a fresh one", async () => {
-    const cache = cacheOn(new MapBackend());
+    const cache = cacheOn(new MapCacheBackend());
     await cache.bump("k");
     await cache.set("k", "v1-body");
     expect(await cache.get("k")).toBe("v1-body");
   });
 
   it("delete is a bump, not a reset", async () => {
-    const cache = cacheOn(new MapBackend());
+    const cache = cacheOn(new MapCacheBackend());
     await cache.set("k", "under-v0");
     await cache.bump("k");
     await cache.set("k", "under-v1");
@@ -88,7 +56,7 @@ describe("VersionedCache — version at read", () => {
   });
 
   it("scoped bodies miss when any scope bumps", async () => {
-    const cache = cacheOn(new MapBackend(), "flags");
+    const cache = cacheOn(new MapCacheBackend(), "flags");
     const [body, token] = await cache.getScoped("flag", "all", "org:o1", "user:u1");
     expect(body).toBeNull();
     await cache.setScoped("flag", "1", token);
@@ -102,7 +70,7 @@ describe("VersionedCache — version at read", () => {
   });
 
   it("keys are namespaced, so two caches never collide", async () => {
-    const backend = new MapBackend();
+    const backend = new MapCacheBackend();
     const a = cacheOn(backend, "perm");
     const b = cacheOn(backend, "entl");
     await a.set("k", "from-perm");
@@ -114,7 +82,7 @@ describe("VersionedCache — version at read", () => {
 
 describe("VersionedCache — deferred invalidation", () => {
   it("a deferred bump runs after the commit, de-duplicated", async () => {
-    const cache = cacheOn(new MapBackend());
+    const cache = cacheOn(new MapCacheBackend());
     const tx = new FakeTx();
     tx.deferBump(cache, "k");
     tx.deferBump(cache, "k");
@@ -125,7 +93,7 @@ describe("VersionedCache — deferred invalidation", () => {
   });
 
   it("invalidate bumps now AND queues a post-commit bump", async () => {
-    const cache = cacheOn(new MapBackend());
+    const cache = cacheOn(new MapCacheBackend());
     const tx = new FakeTx();
     await cache.set("k", "before");
     await cache.invalidate(tx, "k");
@@ -136,7 +104,7 @@ describe("VersionedCache — deferred invalidation", () => {
   });
 
   it("a rollback discards the queued bumps", async () => {
-    const cache = cacheOn(new MapBackend());
+    const cache = cacheOn(new MapCacheBackend());
     const tx = new FakeTx();
     tx.deferBump(cache, "k");
     tx.pending.length = 0; // discardDeferredBumps()

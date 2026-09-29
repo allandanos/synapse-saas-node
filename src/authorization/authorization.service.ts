@@ -5,6 +5,7 @@ import { SETTINGS, type Settings } from "../core/config";
 import { Database, type Tx } from "../core/db/database";
 import { FgaError, PermissionDeniedError, RoleNotFoundError, SystemRoleImmutableError } from "../core/errors";
 import { RequestContext, type UserContext } from "../core/request-context";
+import { FgaClient } from "./fga/client";
 import { FgaSyncService, orgObject, userObject } from "./fga/sync";
 import { relationFor } from "./fga/model";
 import { unknownPermissions } from "./permissions";
@@ -109,7 +110,7 @@ export class AuthorizationService {
     if (cached !== null) return cached === "1";
     let allowed: boolean;
     try {
-      allowed = await this.fga.client().check(userObject(userId), relationFor(permission), object);
+      allowed = await new FgaClient(this.settings).check(userObject(userId), relationFor(permission), object);
     } catch (error) {
       if (!(error instanceof FgaError)) throw error;
       if (this.settings.SYNAPSE_OPENFGA_FAIL_MODE === "rbac" && object.startsWith("organization:")) {
