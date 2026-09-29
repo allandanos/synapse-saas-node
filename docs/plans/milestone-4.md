@@ -7,7 +7,7 @@ reference disagree, the reference server wins — report the discrepancy.
 
 ## Gate
 
-`tests/conformance/test_billing.py` (7 tests) green against this server with
+`tests/conformance/test_billing.py` (6 tests) green against this server with
 `SYNAPSE_BILLING_PROVIDER=manual`, plus **no regression** in milestones 1–3
 (`test_meta_and_health`, `test_problem_documents`, `test_auth`, `test_tenancy`,
 `test_authorization`, `test_api_keys`, `test_subscriptions`,
@@ -46,8 +46,8 @@ pin: `period` inputs (`GET /v1/usage/summary?period=`, `POST
     `manual_instructions` (from `SYNAPSE_MANUAL_PAY_TO_INSTRUCTIONS`), confirm
     activates the plan, webhook ingest requires the manual token (read the
     header name in `manual_provider.py`).
-  - **stripe**: form-encoded REST (`https://api.stripe.com/v1/...`, Bearer
-    secret): customers, checkout sessions, billing-portal sessions,
+  - **stripe**: form-encoded REST (`https://api.stripe.com/v1/...`, HTTP Basic
+    with the secret key as username, empty password): customers, checkout sessions, billing-portal sessions,
     subscription item update (plan change), cancel, invoices list. Webhook:
     `Stripe-Signature: t=…,v1=…`, HMAC-SHA256 over `"{t}.{raw_body}"`,
     tolerance window, constant-time compare.
@@ -81,14 +81,13 @@ pin: `period` inputs (`GET /v1/usage/summary?period=`, `POST
   with `provider_subscription_id` → `provider.change_plan(...)` then apply the
   local transition; keep the local path and the 409 `checkout_required`.
 
-## 3. Billing webhooks — `billing/webhooks.py`, router `/webhooks/{provider}`
+## 3. Billing webhooks — `billing/webhooks.py`, route `POST /v1/billing/webhooks/{provider}`
 
 - The route reads the RAW request body (signature is over bytes).
 - Ledger table `provider_webhook_events` (columns in `schema-v1.sql`):
   unique per `(provider, provider_event_id)`; a replay answers 200 without
   re-applying.
-- Flow: `verify_webhook` (bad/missing signature → the reference's 400/401
-  problem) → `translate_webhook` → insert ledger row → `_apply` in the same
+- Flow: `verify_webhook` (bad/missing signature → 400 `webhook_signature_invalid`) → `translate_webhook` → insert ledger row → `_apply` in the same
   transaction. A `DomainError` from `_apply` is recorded on the ledger row
   (`error` column) and the response is 200; any other exception propagates
   (500) so the transaction, ledger row included, rolls back and the provider
