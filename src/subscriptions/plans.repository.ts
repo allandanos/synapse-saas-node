@@ -223,6 +223,15 @@ export class PlansRepository {
     );
   }
 
+  /** Merge one provider's refs into `plans.provider_refs` without touching the others. */
+  async setProviderRefs(tx: Tx, key: string, provider: string, refs: Record<string, string>): Promise<void> {
+    await tx.query(
+      `UPDATE plans SET provider_refs = COALESCE(provider_refs, '{}'::jsonb) || jsonb_build_object($2::text, $3::jsonb), updated_at = now()
+       WHERE key = $1`,
+      [key, provider, JSON.stringify(refs)],
+    );
+  }
+
   async archivePlan(tx: Tx, id: string, at: Date): Promise<void> {
     await tx.query(`UPDATE plans SET archived_at = $2, updated_at = now() WHERE id = $1`, [id, at]);
   }

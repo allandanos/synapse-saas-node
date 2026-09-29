@@ -5,6 +5,7 @@ import { TenancyModule } from "../tenancy/tenancy.module";
 import { UsageModule } from "../usage/usage.module";
 import { BillingCustomersRepository } from "./billing-customers.repository";
 import { BillingService } from "./billing.service";
+import { PlanCatalogPush } from "./plan-catalog-push";
 import { InvoicesRepository } from "./invoicing/invoices.repository";
 import { InvoicingService } from "./invoicing/invoicing.service";
 import { BillingProviderRegistry } from "./registry";
@@ -21,6 +22,7 @@ const ENGINE = [
   WebhookLedgerRepository,
   BillingWebhooksService,
   BillingService,
+  PlanCatalogPush,
 ];
 
 /**

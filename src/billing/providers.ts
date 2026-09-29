@@ -166,6 +166,17 @@ export interface BillingProvider {
   listInvoices(providerCustomerId: string, limit?: number): Promise<InvoiceRef[]>;
   verifyWebhook(raw: WebhookRequest): Promise<VerifiedWebhook>;
   translateWebhook(verified: VerifiedWebhook): NormalizedBillingEvent[];
+  /** `PLAN_SYNC` providers only: create (or reuse) the product + price for a plan. */
+  upsertProductAndPrice?(input: UpsertPlanRequest): Promise<Record<string, string>>;
+}
+
+/** One paid plan, as the catalog describes it, for `upsertProductAndPrice`. */
+export interface UpsertPlanRequest {
+  readonly planKey: string;
+  readonly planName: string;
+  readonly priceCents: number;
+  readonly currency: string;
+  readonly interval: string;
 }
 
 /** Injected so tests can point a provider at a local stub HTTP server. */
