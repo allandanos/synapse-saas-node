@@ -77,3 +77,15 @@ export function bodyParseProblemMiddleware(): ErrorRequestHandler {
     next(isBodyParseError(error) ? new ValidationFailedError([{ loc: ["body"], msg: "JSON decode error", type: "json_invalid" }]) : error);
   };
 }
+
+/**
+ * `YYYY-MM` billing/usage period inputs (`GET /v1/usage/summary?period=`,
+ * `POST /v1/billing/invoices/draft {period}`). The month is validated so
+ * `2026-13` answers 422 `validation_failed` instead of a 500 from the parser.
+ */
+export const PERIOD_PATTERN = /^\d{4}-(0[1-9]|1[0-2])$/;
+
+/** `YYYY-MM` → the first day of that month as `YYYY-MM-01` (a Postgres `date` literal). */
+export function periodMonthStart(period: string | null | undefined): string | undefined {
+  return period ? `${period}-01` : undefined;
+}

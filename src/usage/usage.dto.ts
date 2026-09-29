@@ -1,4 +1,5 @@
 import { Type } from "class-transformer";
+import { PERIOD_PATTERN } from "../core/validation";
 import { ArrayMaxSize, ArrayMinSize, IsArray, IsInt, IsObject, IsOptional, IsString, Matches, Min, ValidateNested } from "class-validator";
 
 export class UsageEventIn {
@@ -57,6 +58,6 @@ export class UsageCheckQuery {
 export class UsageSummaryQuery {
   @IsOptional()
   @IsString()
-  @Matches(/^\d{4}-\d{2}$/)
+  @Matches(PERIOD_PATTERN)
   period?: string | null;
 }
