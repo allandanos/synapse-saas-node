@@ -6,8 +6,10 @@ in [`synapse-saas`](../synapse-saas) — see its
 [ADR 0012](../synapse-saas/docs/adr/0012-polyglot-ports-contract-first.md) and
 [porting guide](../synapse-saas/ports/README.md).
 
-**Contract pinned at:** `synapse-saas@6272ab3` (`contracts/` is a snapshot of
+**Contract pinned at:** `synapse-saas@60ff0e3` (`contracts/` is a snapshot of
 that commit; re-copy when the reference's `contracts/CHANGELOG.md` gains an entry).
+The bump from `6272ab3` is milestone 6's round trip — the reference adopted this
+port's findings in `7bdb348`; `contracts/` itself is byte-identical.
 
 ## Status
 
@@ -331,8 +333,9 @@ refresh cookie (HttpOnly, `SameSite=Lax`, `Path=/`, and `Secure` only for an
 https origin or production — `src/identity/refresh-cookie.ts`), and a
 `POST /v1/auth/refresh` that accepts the cookie with an empty body.
 
-**Console-visible differences: none.** One was found and closed — see
-"Where this port deliberately differs" for the invoice-attachment MIME.
+**Console-visible differences: none.** Two were found and are closed upstream
+(the reset-email link and the attachment-MIME over-specification) — see "Where
+this port deliberately differs".
 
 ### Dev seed
 
@@ -345,8 +348,10 @@ pnpm seed:dev     # system seed + plan catalog, then the demo org
 (free subscription, seat gauge, `org.created`), owned by
 `owner@acme.example.com` — a platform admin — plus `admin@`, `billing@`,
 `developer@` and `member@acme.example.com`, each invited with its own system
-role and auto-accepted. Password for all five: `password123`. Idempotent (the
-owner's presence is the marker) and refused when `SYNAPSE_ENV=production`.
+role and auto-accepted, then an operator-style `limit:users` grant (10 seats,
+source `override`) so five demo users do not sit over the free plan's three-seat
+meter. Password for all five: `password123`. Idempotent (the owner's presence is
+the marker) and refused when `SYNAPSE_ENV=production`.
 Those are the credentials the console journeys' operator fixture uses.
 
 ### Tests
@@ -412,7 +417,8 @@ Those are the credentials the console journeys' operator fixture uses.
   `dev-seed.test.ts` (one user per system role, all logging in with the
   documented password, only the owner a platform admin, every member active in
   `acme` with its own role, the free subscription the create-org path
-  bootstraps, and a second run being a no-op) rounds out the DB-backed suites.
+  bootstraps, the `limit:users` grant covering all five demo users, and a second
+  run being a no-op) rounds out the DB-backed suites.
   Every table of that database is truncated first — never point it at data you
   care about. `SYNAPSE_TEST_TENANT_ISOLATION=app_and_rls` runs them with RLS
   bindings on (requires connecting as an RLS-subject role).
@@ -540,18 +546,24 @@ invisible to the contract:
 - **`verifyWebhook` always rejects through a promise** rather than throwing
   synchronously, so a caller cannot miss a refusal by forgetting to await.
 
-Milestone 6 turned up one console-visible difference, now closed here:
+This port's milestone-6 findings were adopted by the reference in
+`synapse-saas@7bdb348`, so both disagreements are closed rather than carried:
 
-- **Invoice attachment MIME.** The reference composes mail with Python's
-  `EmailMessage.add_attachment` (`notifications/smtp.py:62`), which emits a bare
-  `Content-Type: application/pdf`, then `Content-Transfer-Encoding`, then a
-  **quoted** `filename`, then a per-part `MIME-Version: 1.0`. The console's
-  `e2e/invoice-email.spec.ts:89-92` matches that part with an anchored regex, so
-  the spelling is observable. nodemailer composes its own (`; name=` on the
-  content type, an unquoted filename, no per-part `MIME-Version`) and failed it;
-  `rawAttachmentPart` in `src/notifications/smtp.notifier.ts` now builds the part
-  and hands nodemailer the source verbatim. `test/unit/notifications.test.ts`
-  pins it against the console's own regex.
+- **The password-reset email linked to the wrong page.** Both servers built
+  `{web_origin}/login?reset=<token>`, but the console's login page only
+  recognises `?reset=done` — the form lives at `/reset-password?reset=<token>`.
+  A user following the emailed link reached the sign-in page with no way to
+  reset. Both now link to the reset form, and the console's auth journey
+  actually walks it (read the mail, follow the link, set a new password, log in
+  with it, be refused with the old one) instead of only probing a bogus token.
+- **`invoice-email.spec.ts` pinned CPython's MIME byte layout** — header order,
+  quoted `filename`, per-part `MIME-Version` — which nodemailer and JavaMail
+  each spell differently, so both ports had to reverse-engineer the bytes. The
+  spec now uses `pdfAttachmentBase64()`, which finds *any* base64
+  `application/pdf` part. This port's imitation of the Python layout is gone:
+  `toMailOptions` hands nodemailer plain attachments again, and
+  `test/unit/notifications.test.ts` composes a real message and runs the
+  console's own extractor over the bytes.
 
 This port's milestone-5 findings were adopted by the reference in
 `synapse-saas@6272ab3`, and the conformance suite now asserts them, so the
