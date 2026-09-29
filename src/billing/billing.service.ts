@@ -1,12 +1,19 @@
 import { Inject, Injectable, Logger } from "@nestjs/common";
 import { SETTINGS, type Settings } from "../core/config";
 import { Database, type Tx } from "../core/db/database";
-import { BillingProviderNotConfiguredError, CheckoutRequiredError } from "../core/errors";
+import { CheckoutConfirmNotAllowedError, CheckoutRequiredError, OrganizationNotFoundError } from "../core/errors";
+import { events } from "../core/events";
+import { OutboxWriter } from "../core/outbox";
+import { RequestContext } from "../core/request-context";
 import type { PlanWithDetails } from "../subscriptions/plans.repository";
 import { arrearsAdjustmentCents, prorate } from "../subscriptions/proration";
 import { SubscriptionsRepository, type SubscriptionRow } from "../subscriptions/subscriptions.repository";
 import { SubscriptionsService, type SubscriptionWithPlan } from "../subscriptions/subscriptions.service";
-import { BillingCapability, capabilitiesOf } from "./providers";
+import { OrganizationsRepository, type OrganizationRow } from "../tenancy/organizations.repository";
+import { type BillingCustomerRow, BillingCustomersRepository } from "./billing-customers.repository";
+import { InvoicesRepository } from "./invoicing/invoices.repository";
+import { BillingCapability, type BillingProvider, capabilitiesOf, type CheckoutResult } from "./providers";
+import { BillingProviderRegistry } from "./registry";
 
 interface PeriodSnapshot {
   plan_key: string;
@@ -46,10 +53,16 @@ export function prorationAdjustment(previous: PeriodSnapshot | null, subscriptio
   };
 }
 
+export interface CheckoutStart {
+  customer: BillingCustomerRow;
+  result: CheckoutResult;
+}
+
 /**
- * Plan changes through the active provider (the reference's
- * `BillingService.change_plan`, ADR 0004). Customers, checkout, invoices and
- * the provider clients arrive with milestone 4.
+ * The billing domain service: customers, checkout, the billing portal, and
+ * plan changes through the active provider (ADR 0004). Provider calls happen
+ * BEFORE the local mutation, so a failed provider call leaves no local state
+ * behind.
  */
 @Injectable()
 export class BillingService {
@@ -58,12 +71,160 @@ export class BillingService {
   constructor(
     @Inject(SETTINGS) private readonly settings: Settings,
     private readonly db: Database,
+    private readonly registry: BillingProviderRegistry,
     private readonly subscriptions: SubscriptionsService,
     private readonly subscriptionRows: SubscriptionsRepository,
+    private readonly customers: BillingCustomersRepository,
+    private readonly organizations: OrganizationsRepository,
+    private readonly invoices: InvoicesRepository,
+    private readonly outbox: OutboxWriter,
+    private readonly context: RequestContext,
   ) {}
 
   get providerName(): string {
     return this.settings.SYNAPSE_BILLING_PROVIDER;
+  }
+
+  /** The configured provider client. Built per call so credentials are read fresh. */
+  provider(): BillingProvider {
+    return this.registry.current();
+  }
+
+  // ── Customers ───────────────────────────────────────────────────────────────
+
+  /** The org's `billing_customers` row, creating the provider-side customer on first use. */
+  async ensureCustomer(tx: Tx, organization: OrganizationRow, contact?: { email: string; name: string | null } | null): Promise<BillingCustomerRow> {
+    const existing = await this.customers.findByOrganization(tx, organization.id);
+    if (existing) return existing;
+    const owner = contact ?? (await this.ownerContact(tx, organization));
+    const provider = this.provider();
+    const ref = await provider.createCustomer({
+      email: owner.email,
+      name: owner.name,
+      organizationId: organization.id,
+      currency: this.settings.SYNAPSE_BILLING_CURRENCY,
+    });
+    return this.customers.insert(tx, {
+      organizationId: organization.id,
+      provider: provider.name,
+      providerCustomerId: ref.providerCustomerId,
+      email: ref.email ?? null,
+      name: ref.name ?? null,
+      currency: this.settings.SYNAPSE_BILLING_CURRENCY,
+    });
+  }
+
+  private async ownerContact(tx: Tx, organization: OrganizationRow): Promise<{ email: string; name: string | null }> {
+    const owner = await this.customers.ownerContact(tx, organization.id);
+    if (owner) return { email: owner.email, name: owner.display_name };
+    return { email: `${organization.slug}@example.com`, name: organization.name };
+  }
+
+  // ── Checkout ────────────────────────────────────────────────────────────────
+
+  /** Create a checkout with the provider and return its URL (or the manual instructions). */
+  async startCheckout(
+    tx: Tx,
+    organization: OrganizationRow,
+    plan: PlanWithDetails,
+    urls: { successUrl?: string; cancelUrl?: string } = {},
+    contact?: { email: string; name: string | null } | null,
+  ): Promise<CheckoutStart> {
+    const customer = await this.ensureCustomer(tx, organization, contact);
+    const result = await this.provider().createCheckout({
+      planKey: plan.key,
+      planName: plan.name,
+      priceCents: plan.price_cents ?? 0,
+      currency: plan.currency,
+      interval: plan.interval ?? "month",
+      providerCustomerId: customer.provider_customer_id,
+      successUrl: urls.successUrl ?? null,
+      cancelUrl: urls.cancelUrl ?? null,
+      organizationId: organization.id,
+    });
+    return { customer, result };
+  }
+
+  /**
+   * Activate the subscription after checkout.
+   *
+   * `source: "webhook"` is the provider telling us payment happened;
+   * `source: "client_confirm"` is the tenant telling us — only trustworthy on a
+   * provider with no payment truth of its own (CLIENT_CONFIRM), otherwise
+   * confirming would be a free upgrade.
+   */
+  async completeCheckout(
+    tx: Tx,
+    organization: OrganizationRow,
+    plan: PlanWithDetails,
+    options: { providerSubscriptionId?: string | null; contact?: { email: string; name: string | null } | null; source: "webhook" | "client_confirm" },
+  ): Promise<SubscriptionWithPlan> {
+    const provider = this.provider();
+    if (options.source === "client_confirm" && !provider.supports.has(BillingCapability.CLIENT_CONFIRM)) {
+      throw new CheckoutConfirmNotAllowedError(
+        `${provider.name} verifies payment via its own callback; activation happens when the provider webhook arrives, not on client confirmation`,
+        { provider: provider.name },
+      );
+    }
+    const customer = await this.ensureCustomer(tx, organization, options.contact);
+    const subscription = await this.subscriptions.changePlan(tx, organization.id, {
+      planKey: plan.key,
+      provider: provider.name,
+      providerSubscriptionId: options.providerSubscriptionId ?? null,
+    });
+    await this.recordInvoice(tx, customer, plan, provider.name);
+    return subscription;
+  }
+
+  /** The provider's self-service portal, or null when it has none (or no customer yet). */
+  async billingPortalUrl(tx: Tx, organization: OrganizationRow, returnUrl: string): Promise<string | null> {
+    const provider = this.provider();
+    if (!provider.supports.has(BillingCapability.BILLING_PORTAL)) return null;
+    const customer = await this.ensureCustomer(tx, organization);
+    if (customer.provider_customer_id === null) return null;
+    return provider.billingPortalUrl(customer.provider_customer_id, returnUrl);
+  }
+
+  /** The plan charge booked at activation time; free plans bill nothing. */
+  private async recordInvoice(tx: Tx, customer: BillingCustomerRow, plan: PlanWithDetails, providerName: string): Promise<void> {
+    const price = plan.price_cents ?? 0;
+    if (price <= 0) return;
+    const invoice = await this.invoices.insert(tx, {
+      organizationId: customer.organization_id,
+      billingCustomerId: customer.id,
+      provider: providerName,
+      currency: plan.currency,
+      subtotalCents: price,
+      totalCents: price,
+      status: "open",
+      periodStart: null,
+      periodEnd: null,
+    });
+    await this.outbox.append(tx, {
+      eventType: events.INVOICE_CREATED,
+      aggregateType: "invoice",
+      aggregateId: invoice.id,
+      organizationId: customer.organization_id,
+      payload: { total_cents: price, currency: plan.currency, plan_key: plan.key },
+    });
+  }
+
+  /** `{web_origin}/dashboard/billing…` — the checkout return and portal URLs. */
+  webUrl(path: string): string {
+    return `${this.settings.SYNAPSE_WEB_ORIGIN.replace(/\/+$/, "")}${path}`;
+  }
+
+  /** The org row, or 404 — every billing route is scoped to one organization. */
+  async requireOrganization(tx: Tx, organizationId: string): Promise<OrganizationRow> {
+    const organization = await this.organizations.findById(tx, organizationId);
+    if (!organization) throw new OrganizationNotFoundError("Organization not found");
+    return organization;
+  }
+
+  /** The acting user as a billing contact, when a user is acting at all. */
+  actingContact(): { email: string; name: string | null } | null {
+    const user = this.context.user();
+    return user ? { email: user.email, name: null } : null;
   }
 
   changePlan(organizationId: string, planKey: string): Promise<SubscriptionWithPlan> {
@@ -109,14 +270,22 @@ export class BillingService {
   }
 
   /**
-   * MILESTONE 4 SEAM — hosted provider with an existing provider subscription:
-   * call `provider.change_plan(provider_subscription_id, {plan_key, price_cents,
-   * currency, interval})`, then `subscriptions.changePlan(…, {provider,
-   * providerSubscriptionId: ref.provider_subscription_id, keepPeriod: true})`.
-   * The provider clients do not exist yet, so the branch is refused explicitly
-   * rather than pretending the provider was told.
+   * Hosted provider with an existing provider subscription: the provider owns
+   * proration and invoicing, so it is told first and the local row follows its
+   * answer (the period is kept — the provider's cycle is the truth).
    */
-  protected changePlanWithProvider(_tx: Tx, _organizationId: string, _current: SubscriptionRow, _plan: PlanWithDetails): Promise<SubscriptionWithPlan> {
-    throw new BillingProviderNotConfiguredError(`${this.providerName} plan changes need the provider client (milestone 4)`, { provider: this.providerName });
+  protected async changePlanWithProvider(tx: Tx, organizationId: string, current: SubscriptionRow, plan: PlanWithDetails): Promise<SubscriptionWithPlan> {
+    const ref = await this.provider().changePlan(current.provider_subscription_id as string, {
+      planKey: plan.key,
+      priceCents: plan.price_cents ?? 0,
+      currency: plan.currency,
+      interval: plan.interval ?? "month",
+    });
+    return this.subscriptions.changePlan(tx, organizationId, {
+      planKey: plan.key,
+      provider: this.providerName,
+      providerSubscriptionId: ref.providerSubscriptionId,
+      keepPeriod: true,
+    });
   }
 }

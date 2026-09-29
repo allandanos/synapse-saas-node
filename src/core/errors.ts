@@ -113,6 +113,13 @@ export const UnknownMetricError = define(422, "unknown_metric");
 /** A hosted-billing provider cannot change a plan that was never purchased through it. */
 export const CheckoutRequiredError = define(409, "checkout_required");
 export const BillingProviderNotConfiguredError = define(409, "billing_provider_not_configured");
+/** Client-side checkout confirmation on a provider that verifies payment itself. */
+export const CheckoutConfirmNotAllowedError = define(409, "checkout_confirm_not_allowed");
+/** The provider's API refused or was unreachable — never a 500, the fault is upstream. */
+export const BillingProviderError = define(502, "billing_provider_error");
+/** Missing, malformed, stale or mismatched provider webhook signature. */
+export const WebhookSignatureInvalidError = define(400, "webhook_signature_invalid");
+export const InvoiceNotFoundError = define(404, "invoice_not_found");
 
 // ── Misc ───────────────────────────────────────────────────────────────────────
 export const NotFoundError = define(404, "not_found");

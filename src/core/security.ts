@@ -1,4 +1,4 @@
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { Inject, Injectable } from "@nestjs/common";
 import { Algorithm, hash as argon2Hash, verify as argon2Verify } from "@node-rs/argon2";
 import jwt from "jsonwebtoken";
@@ -65,6 +65,24 @@ export function constantTimeEquals(a: string, b: string): boolean {
   const left = Buffer.from(a, "utf8");
   const right = Buffer.from(b, "utf8");
   return left.length === right.length && timingSafeEqual(left, right);
+}
+
+/**
+ * Stripe-style v1 signature: `HMAC_SHA256(secret, "{timestamp}." + payload)`
+ * as lowercase hex. Used for outbound webhook signatures (`X-Synapse-Signature`)
+ * and to verify Stripe's and PayMongo's inbound ones.
+ */
+export function signPayload(payload: Buffer, secret: string, timestamp: number): string {
+  return createHmac("sha256", secret).update(`${String(timestamp)}.`).update(payload).digest("hex");
+}
+
+export function verifySignature(payload: Buffer, secret: string, timestamp: number, signature: string): boolean {
+  return constantTimeEquals(signPayload(payload, secret, timestamp), signature);
+}
+
+/** Paddle signs `"{ts}:" + body` — a colon, not Stripe's dot. */
+export function signPayloadColon(payload: Buffer, secret: string, timestamp: number): string {
+  return createHmac("sha256", secret).update(`${String(timestamp)}:`).update(payload).digest("hex");
 }
 
 @Injectable()

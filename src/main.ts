@@ -2,6 +2,7 @@ import "reflect-metadata";
 import { NestFactory } from "@nestjs/core";
 import type { NestExpressApplication } from "@nestjs/platform-express";
 import cookieParser from "cookie-parser";
+import express from "express";
 import { ClsMiddleware } from "nestjs-cls";
 import { AppModule, clsMiddlewareOptions } from "./app.module";
 import { prepareDatabase } from "./bootstrap";
@@ -10,9 +11,13 @@ import { bodyParseProblemMiddleware } from "./core/validation";
 
 export const EXPOSED_HEADERS = ["X-Request-Id", "Retry-After", "Content-Disposition", "X-Total-Count"];
 
+/** Provider webhooks are signed over the exact bytes sent, so this path never reaches the JSON parser. */
+export const RAW_BODY_PATH = "/v1/billing/webhooks/:provider";
+
 /** Wire the HTTP layer the same way in production and in supertest (create the app with `bodyParser: false`). */
 export function configureHttp(app: NestExpressApplication, settings: Settings): void {
   app.use(new ClsMiddleware(clsMiddlewareOptions).use);
+  app.use(RAW_BODY_PATH, express.raw({ type: "*/*", limit: "1mb" }));
   app.useBodyParser("json");
   app.useBodyParser("urlencoded", { extended: true });
   app.use(bodyParseProblemMiddleware());

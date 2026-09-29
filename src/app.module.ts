@@ -6,6 +6,7 @@ import { ClsMiddlewareOptions, ClsModule, type ClsService } from "nestjs-cls";
 import { ApiKeysModule } from "./api-keys/api-keys.module";
 import { ProbeController } from "./api/probe.controller";
 import { AuthorizationModule } from "./authorization/authorization.module";
+import { BillingRoutesModule } from "./billing/billing-routes.module";
 import { RolesModule } from "./authorization/roles.module";
 import { CoreModule } from "./core/core.module";
 import { EntitlementsRoutesModule } from "./entitlements/entitlements-routes.module";
@@ -50,6 +51,7 @@ export const clsMiddlewareOptions: ClsMiddlewareOptions = {
     SubscriptionsRoutesModule,
     EntitlementsRoutesModule,
     UsageRoutesModule,
+    BillingRoutesModule,
   ],
   controllers: [ProbeController],
   providers: [

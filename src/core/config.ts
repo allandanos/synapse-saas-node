@@ -29,6 +29,9 @@ const csv = z.preprocess((v) => {
 
 const positiveInt = z.coerce.number().int().positive();
 
+/** An optional string setting: an empty value falls back to the default. */
+const str = (fallback: string) => z.preprocess(emptyIsUndefined, z.string().default(fallback));
+
 /** The catalog shipped with the port (`config/plans.yaml`, verbatim from the reference); products point SYNAPSE_PLANS_FILE at their own. */
 export const DEFAULT_PLANS_FILE = resolve(__dirname, "..", "..", "config", "plans.yaml");
 
@@ -43,6 +46,31 @@ const schema = z.object({
   SYNAPSE_COOKIE_SECURE: bool.optional(),
   SYNAPSE_BILLING_PROVIDER: z.enum(["manual", "stripe", "paddle", "xendit", "paymongo"]).default("manual"),
   SYNAPSE_BILLING_CURRENCY: z.string().regex(/^[A-Z]{3}$/).default("PHP"),
+  // Provider credentials. A hosted provider selected without its secret is a
+  // 409 `billing_provider_not_configured` from the registry, never a silent no-op.
+  SYNAPSE_STRIPE_SECRET_KEY: str(""),
+  SYNAPSE_STRIPE_WEBHOOK_SECRET: str(""),
+  SYNAPSE_PADDLE_SECRET_KEY: str(""),
+  SYNAPSE_PADDLE_WEBHOOK_SECRET: str(""),
+  SYNAPSE_XENDIT_SECRET_KEY: str(""),
+  SYNAPSE_XENDIT_WEBHOOK_TOKEN: str(""),
+  SYNAPSE_PAYMONGO_SECRET_KEY: str(""),
+  SYNAPSE_PAYMONGO_WEBHOOK_SECRET: str(""),
+  /** Shared deployment token for `POST /v1/billing/webhooks/manual` (`X-Manual-Token`). */
+  SYNAPSE_MANUAL_WEBHOOK_TOKEN: str(""),
+  /** Pay-to text printed on manual invoices and their PDFs. */
+  SYNAPSE_MANUAL_PAY_TO_INSTRUCTIONS: str(""),
+  // Notifications: `smtp` sends through the relay below once a host is set.
+  SYNAPSE_NOTIFIER: z.enum(["smtp", "noop"]).default("smtp"),
+  SYNAPSE_SMTP_HOST: str(""),
+  SYNAPSE_SMTP_PORT: positiveInt.default(1025),
+  SYNAPSE_SMTP_FROM: str("synapse@localhost"),
+  SYNAPSE_SMTP_USERNAME: str(""),
+  SYNAPSE_SMTP_PASSWORD: str(""),
+  SYNAPSE_SMTP_TLS: z.enum(["none", "starttls", "ssl"]).default("none"),
+  /** Background jobs run in-process with the API (`pnpm worker` runs them alone). */
+  SYNAPSE_WORKER_ENABLED: bool.default(true),
+  SYNAPSE_AUDIT_RETENTION_DAYS: positiveInt.default(365),
   SYNAPSE_PLANS_FILE: z.preprocess(emptyIsUndefined, z.string().default(DEFAULT_PLANS_FILE)),
   SYNAPSE_AUTO_SYNC_PLANS: bool.default(true),
   SYNAPSE_DEFAULT_PLAN_KEY: z.string().min(1).default("free"),
