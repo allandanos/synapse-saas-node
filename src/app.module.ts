@@ -19,6 +19,7 @@ import { IdentityModule } from "./identity/identity.module";
 import { SubscriptionsRoutesModule } from "./subscriptions/subscriptions-routes.module";
 import { TenancyModule } from "./tenancy/tenancy.module";
 import { UsageRoutesModule } from "./usage/usage-routes.module";
+import { WebhooksRoutesModule } from "./webhooks/webhooks-routes.module";
 import { WorkerModule } from "./worker/worker.module";
 
 export const REQUEST_ID_HEADER = "X-Request-Id";
@@ -59,6 +60,7 @@ export const clsMiddlewareOptions: ClsMiddlewareOptions = {
     AgentsModule,
     AuditRoutesModule,
     FeatureFlagsModule,
+    WebhooksRoutesModule,
     WorkerModule,
   ],
   controllers: [ProbeController],
