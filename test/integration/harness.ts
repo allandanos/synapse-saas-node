@@ -58,6 +58,11 @@ export async function startHarness(): Promise<Harness> {
   // The journeys drive `JobsService` explicitly; the in-process cadence would
   // otherwise race them (and keep timers alive past the suite).
   process.env.SYNAPSE_WORKER_ENABLED = "false";
+  // The suites register hundreds of accounts from one address, and with a real
+  // SYNAPSE_REDIS_URL the window is shared across files and consecutive runs.
+  // A suite that IS about rate limiting sets its own limits before calling us.
+  process.env.SYNAPSE_AUTH_RATE_LIMIT_PER_IP ??= "100000";
+  process.env.SYNAPSE_AUTH_RATE_LIMIT_PER_IDENTITY ??= "100000";
   // SeedsModule is CLI-only in production; the harness adds it so the dev-seed suite can resolve it.
   const moduleRef = await Test.createTestingModule({ imports: [AppModule, SeedsModule] }).compile();
   const app = moduleRef.createNestApplication<NestExpressApplication>({ bodyParser: false });

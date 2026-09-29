@@ -32,8 +32,6 @@ export const CACHE_NAMESPACES = {
   ENTITLEMENTS: { name: "entl", ttl: 60 },
   /** Flag evaluations, scoped on (all, org, user) — `feature_flags/service.py`. */
   FLAGS: { name: "fflags", ttl: 30 },
-  /** Membership lookups — declared by the reference (`tenancy/dependencies.py`), unused there. */
-  MEMBER: { name: "member", ttl: 60 },
   /** OIDC login state (PKCE verifier + nonce), single use — `identity/router.py`. */
   OIDC: { name: "oidc", ttl: 600, durable: true },
 } as const satisfies Record<string, CacheNamespace>;

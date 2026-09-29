@@ -39,7 +39,8 @@ describe.skipIf(!TEST_DB)("SSO login (real Postgres, stubbed IdP)", () => {
     process.env.SYNAPSE_IDENTITY_PROVIDER = before.provider ?? "local";
     process.env.SYNAPSE_WEB_ORIGIN = before.origin ?? "http://localhost:3000";
     process.env.SYNAPSE_KEYCLOAK_BASE_URL = "";
-    process.env.SYNAPSE_AUTH_RATE_LIMIT_PER_IP = before.perIp ?? "";
+    if (before.perIp === undefined) delete process.env.SYNAPSE_AUTH_RATE_LIMIT_PER_IP;
+    else process.env.SYNAPSE_AUTH_RATE_LIMIT_PER_IP = before.perIp;
   });
 
   /** Kick off the flow; returns the state and nonce as the IdP would receive them. */
@@ -167,6 +168,31 @@ describe.skipIf(!TEST_DB)("SSO login (real Postgres, stubbed IdP)", () => {
 
     expect((await h.http.get("/v1/auth/oidc/callback").query({ error: "access_denied", state: "x" })).status).toBe(401);
     expect((await h.http.get("/v1/auth/oidc/callback").query({ state: "x" })).status).toBe(401);
+  });
+
+  it("can proxy the password form to Keycloak when the grant is explicitly enabled", async () => {
+    // Off by default; this case restarts the app with it on, then puts it back.
+    const email = `ropc-${uid()}@example.com`;
+    await stopHarness(h);
+    process.env.SYNAPSE_KEYCLOAK_ALLOW_PASSWORD_GRANT = "true";
+    h = await startHarness();
+    try {
+      idp.nextToken = idToken(keypair, idp.issuer, { email, sub: `kc-${email}` });
+      const res = await h.http.post("/v1/auth/login").send({ email, password: "whatever-keycloak-says" });
+      expect(res.status, res.text).toBe(200);
+      expect(res.body.user.email).toBe(email);
+      expect(new URLSearchParams(idp.tokenCalls.at(-1)?.body ?? "").get("grant_type")).toBe("password");
+
+      idp.tokenStatus = 401; // Keycloak refuses ⇒ the usual invalid_credentials
+      const denied = await h.http.post("/v1/auth/login").send({ email, password: "wrong" });
+      expect(denied.status).toBe(401);
+      expect(denied.body.title).toBe("invalid credentials");
+      idp.tokenStatus = 200;
+    } finally {
+      await stopHarness(h);
+      process.env.SYNAPSE_KEYCLOAK_ALLOW_PASSWORD_GRANT = "false";
+      h = await startHarness();
+    }
   });
 
   it("points an SSO-only account's password login at the flow that can sign it in", async () => {

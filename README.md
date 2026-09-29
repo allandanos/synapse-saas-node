@@ -21,18 +21,18 @@ port's findings in `7bdb348`; `contracts/` itself is byte-identical.
 | 4 | billing providers, invoicing, notifications, worker | **done** — `test_billing` (6/6) plus no milestone 1–3 regression (`pnpm conformance:m4`) |
 | 5 | webhooks, files, flags, audit, agents | **done** — `test_webhooks`, `test_files`, `test_feature_flags`, `test_audit`, `test_agents` pass and the **whole** reference suite is green (51/51, `pnpm conformance`) |
 | 6 | console parity (Playwright) | **done** — the reference console, unmodified, built against this port: **22 passed, 1 skipped** (`sso.spec.ts` needs Keycloak — milestone 7), conformance still 51/51 (`pnpm e2e:console`) |
-| 7 | OIDC + OpenFGA, hardening | — |
+| 7 | OIDC + OpenFGA, Redis caches, rate limiting, plan sync | **done** — conformance 51/51 in **both** `SYNAPSE_AUTHZ_BACKEND=rbac` and `=openfga`, and the console journeys **23 passed, 0 skipped** with a real Keycloak (`KEYCLOAK=1 pnpm e2e:console`) |
 
 A milestone is done when the corresponding `tests/conformance` modules pass
 against this server (`pnpm conformance`).
 
-Deferred to later milestones: the Redis-backed caches — entitlements are
-computed per request behind `EntitlementsService.effectiveForOrg` and flags are
-evaluated per check behind `FlagsService.evaluate`; the reference's
-invalidation points are marked by `EntitlementsService.invalidate` and
-`FlagsService.invalidate` — Stripe catalog plan-sync from the CLI
-(`StripeBillingProvider.upsertProductAndPrice` exists, `plans:sync` does not
-call it), and auth rate limiting.
+The reference adopted two milestone-7 findings from this port while it was
+being written — the eager tuple convergence and the SSO spec's password
+locator — so both are aligned rather than carried; see "Where this port
+deliberately differs".
+
+Nothing is deferred: every contract surface, both authorization backends, the
+Redis caches, auth rate limiting, SSO and provider plan sync are in.
 
 ## Stack
 
@@ -47,7 +47,9 @@ settings and plan catalog (`yaml` parses `config/plans.yaml`) · `pdfkit` (invoi
 PDFs) · `nodemailer` (SMTP) · `@nestjs/schedule` (the worker's cadence) ·
 `multer` (multipart uploads, memory storage) and `@aws-sdk/client-s3` +
 `@aws-sdk/s3-request-presigner` (the S3-compatible storage backend and its
-SigV4 presigning; the local-disk backend needs neither) · Vitest + supertest.
+SigV4 presigning; the local-disk backend needs neither) · `ioredis` (the
+versioned caches and the rate-limit windows; optional — see **Hardening**) ·
+Vitest + supertest.
 
 ### Design notes
 
@@ -227,6 +229,12 @@ pnpm dev                              # boot with migrations + seed + bootstrap 
 pnpm migrate                          # apply pending migrations/*.sql and exit
 pnpm seed                             # permission catalog + system roles + plan catalog (idempotent) + bootstrap admin
 pnpm plans:sync                       # config/plans.yaml (SYNAPSE_PLANS_FILE) → features/metrics/plans tables
+pnpm plans:sync --stripe              # ...and describe the product/price push to Stripe (dry run)
+pnpm plans:sync --stripe --apply      # ...and actually create them, recording plans.provider_refs
+pnpm authz:fga write-model --create-store <name>   # bootstrap an OpenFGA store + the generated model
+pnpm authz:fga write-model --dsl      # print the model as .fga DSL (no store needed)
+pnpm authz:fga sync --all             # converge every membership's tuples (backfill/repair)
+pnpm authz:fga check <user> <org> <permission>     # ask the store; exit 1 on deny
 pnpm worker                           # the background jobs without the HTTP listener
 pnpm jobs:run-once --all              # run every job once, print `name: count`, exit
 pnpm jobs:run-once dispatch_outbox deliver_webhooks
@@ -234,6 +242,8 @@ pnpm conformance:m2                   # milestone-2 modules of the reference sui
 pnpm conformance:m3                   # milestones 1–3
 pnpm conformance:m4                   # milestones 1–4
 pnpm conformance                      # the whole reference suite (the current gate)
+pnpm e2e:console                      # the reference console's journeys (22 passed, 1 skipped)
+KEYCLOAK=1 pnpm e2e:console           # ...with a real Keycloak (23 passed, 0 skipped)
 ```
 
 Boot sequence (`src/bootstrap.ts`): apply `migrations/*.sql` once each (tracked
@@ -285,6 +295,98 @@ PORT=8090 SYNAPSE_DATABASE_URL=postgresql://synapse:synapse@localhost:5434/synap
 The same credentials go to the conformance suite as
 `SYNAPSE_CONFORMANCE_ADMIN_EMAIL` / `SYNAPSE_CONFORMANCE_ADMIN_PASSWORD`.
 
+### Hardening
+
+Four things the framework does not need to answer a request, and cannot run
+without in production.
+
+**Redis-backed versioned caches.** Invalidation is a counter bump, not a
+delete: a body lives under `{ns}:v{version}:{key}`, the counter under
+`{ns}:ver:{key}`. A reader fetches the (tiny) counter first; a writer bumps it,
+orphaning every body written under the old one. Three rules keep it correct
+(`src/core/cache/versioned-cache.ts`): `set` writes under the version observed
+at READ time, so a bump in between leaves the new version empty instead of
+filling it with a body that is now stale; `delete` is a bump, because resetting
+to 0 would resurrect whatever was cached under version 0; and invalidation
+happens NOW **and again after COMMIT** (`Tx.deferBump`, flushed by
+`Database.transaction`), so a concurrent reader cannot recompute from
+pre-commit rows and cache them under the new version for a whole TTL.
+
+| Namespace | TTL | Holds | Bumped by |
+|---|---|---|---|
+| `perm` | 30 s | a member's effective permission keys | any membership/role change |
+| `fga` | 30 s | OpenFGA decisions, scoped `{user}:{object}` | the same, together with `perm` |
+| `entl` | 60 s | an org's effective entitlements | grants, plan changes, provider webhooks, expiry |
+| `fflags` | 30 s | flag evaluations, scoped (all, org, user) | flag edits and overrides |
+| `oidc` | 600 s | one login attempt's PKCE verifier + nonce | consumed once at the callback |
+
+Without `SYNAPSE_REDIS_URL` every read misses and callers recompute — correct,
+just not fast. The one exception is `oidc`, which is *state* rather than a
+memo: losing it breaks a login instead of costing a recomputation, so it falls
+back to a per-process TTL map (single-worker; production configures Redis).
+Redis errors on read or write are logged and answered as a miss, never a 500,
+and `/readyz` reports `redis: ok | error: … | not_configured`.
+
+**Auth rate limiting.** Two buckets guard every credential endpoint: the client
+IP against network spray and the lowercased target identity against stuffing
+one account. Either tripping answers `429 rate_limited` with
+`retry_after_seconds` and a matching `Retry-After`. A Redis failure fails
+**open** — losing the store costs the distributed counter, never availability.
+
+| Route | Identity field |
+|---|---|
+| `POST /v1/auth/login`, `/register`, `/forgot-password` | `email` |
+| `POST /v1/auth/reset-password`, `/refresh` | — (IP only) |
+| `GET /v1/auth/oidc/start`, `/oidc/callback` | — (IP only) |
+
+`X-Forwarded-For` is read only when the socket peer is inside
+`SYNAPSE_TRUSTED_PROXIES`, and then only back to the first untrusted hop
+(right to left — each proxy appends the peer it saw). With no trusted proxies
+the header is ignored outright, so a spoofed header cannot buy a fresh bucket.
+Production refuses to boot above 100 attempts/IP or 20/identity.
+
+**OpenFGA (ADR 0009).** `SYNAPSE_AUTHZ_BACKEND=openfga` switches the *check*,
+not the data model. RBAC stays the source of truth for what a role means:
+`permissionKeysFor` — which feeds the user context, API-key bounding and audit
+— reads the denormalised membership set whichever backend is active, and only
+`userCan`/`userCanOn` ask the store. The model is generated from the permission
+catalog (`src/authorization/fga/model.ts`), so the two cannot drift: one
+relation per system role, one `can_<resource>_<action>` per permission unioning
+the roles that hold it, each also accepting direct `[user]` tuples so a custom
+role is expressible, plus a `project` type as the resource-level template
+(`viewer`/`editor` inherit from the org or are granted per object). Tuples are
+synced from RBAC through the outbox (`authz.tuples_changed` → the worker's
+consumer diffs desired against current), so no request depends on an OpenFGA
+write succeeding. An outage is never cached and `SYNAPSE_OPENFGA_FAIL_MODE`
+decides what it means: `closed` denies, `rbac` falls back for organization
+objects only. **API-key principals never consult the store** — a key's
+authority is its scopes ∩ the creator's current RBAC.
+
+```bash
+docker run -d --name openfga -p 8081:8080 openfga/openfga:latest run
+SYNAPSE_OPENFGA_URL=http://localhost:8081 pnpm authz:fga write-model --create-store mine
+# → export the printed SYNAPSE_OPENFGA_STORE_ID / _MODEL_ID, then:
+SYNAPSE_AUTHZ_BACKEND=openfga pnpm dev
+SYNAPSE_OPENFGA_URL=... pnpm authz:fga sync --all   # backfill an existing database
+```
+
+**SSO (OIDC, ADR 0010).** `SYNAPSE_IDENTITY_PROVIDER=keycloak` turns on the
+authorization-code flow with PKCE. `/v1/auth/oidc/start` mints an opaque state,
+a verifier and a nonce, keeps them server-side for 600 s and redirects to the
+realm; `/v1/auth/oidc/callback` consumes the state ONCE, exchanges the code and
+verifies the id_token — RS256 against the realm JWKS (cached an hour per
+issuer, refetched exactly once on an unknown `kid`, which is what a key
+rotation looks like from here), `iss`, `aud`, `exp`, the presence of
+`iat`/`sub`, and the bound nonce. Users link by
+`(identity_provider, provider_subject)`, else by a **verified** email, else a
+new SSO-only account with no password hash; an unverified email is refused
+rather than merged, because that is an account takeover. The browser never
+sees a token in a URL: the callback sets the `synapse_rt` cookie and bounces to
+`{web_origin}/auth/callback`, with `return_to` sanitised to a same-site path.
+`/v1/meta.identity_provider` is what makes the console show its SSO button.
+The resource-owner password grant stays off unless
+`SYNAPSE_KEYCLOAK_ALLOW_PASSWORD_GRANT=true`.
+
 ### Conformance
 
 With the server on `:8090`:
@@ -302,6 +404,27 @@ server needs `SYNAPSE_BILLING_PROVIDER=manual`, the bootstrap-admin variables
 below, and a writable `SYNAPSE_STORAGE_ROOT` (the file journeys run on the
 local-disk backend; the S3 path is covered by `pnpm test:db`).
 
+The same 51 pass with the **OpenFGA** backend. Create a store, point the server
+at it, and raise the auth limits (the suite registers many users from one
+address):
+
+```bash
+docker run -d --name openfga -p 8081:8080 openfga/openfga:latest run
+SYNAPSE_OPENFGA_URL=http://localhost:8081 pnpm authz:fga write-model --create-store conformance
+SYNAPSE_AUTHZ_BACKEND=openfga \
+SYNAPSE_OPENFGA_URL=http://localhost:8081 \
+SYNAPSE_OPENFGA_STORE_ID=<printed> SYNAPSE_OPENFGA_MODEL_ID=<printed> \
+SYNAPSE_REDIS_URL=redis://localhost:6391/0 \
+SYNAPSE_AUTH_RATE_LIMIT_PER_IP=1000 SYNAPSE_AUTH_RATE_LIMIT_PER_IDENTITY=100 \
+PORT=8090 pnpm dev
+# then the same pytest command
+```
+
+The tuples are written by the server as memberships change, so the run needs no
+manual `authz fga sync`; the default `closed` fail mode means a store that is
+not actually answering would fail every permission-gated test rather than pass
+one quietly.
+
 ### Console parity
 
 The reference ships the product console (`apps/web`, Next.js) with five
@@ -309,22 +432,30 @@ Playwright journey files. Milestone 6 is the gate that the **unmodified**
 console — same source, same specs — works against this port:
 
 ```bash
-pnpm e2e:console            # 22 passed, 1 skipped
+pnpm e2e:console                       # 22 passed, 1 skipped
+KEYCLOAK=1 pnpm e2e:console            # 23 passed, 0 skipped (sso.spec.ts included)
 pnpm e2e:console e2e/billing.spec.ts   # arguments go through to playwright
 ```
 
 `scripts/e2e-console.sh` does the whole loop and tears everything down after:
-a MailHog container, a copy of the reference console built with
+MailHog and Redis containers, a copy of the reference console built with
 `NEXT_PUBLIC_API_URL` pointing at this server, a freshly created database,
 `pnpm migrate && pnpm seed:dev`, the API, the console, then
 `playwright test`. Every resource is overridable from the environment
 (`REFERENCE_WEB`, `CONSOLE_DIR`, `CONSOLE_PORT`, `API_PORT`, `DATABASE_URL`,
-`PG_CONTAINER`, `MAILHOG_NAME`/`_SMTP_PORT`/`_HTTP_PORT`, `SKIP_CONSOLE_BUILD=1`);
-the defaults keep the run clear of the reference's own dev stack. The server it
-boots uses the manual billing provider, SMTP pointed at MailHog, the in-process
-worker (outbox dispatch drives the invoice mail) and local-disk storage.
+`PG_CONTAINER`, `MAILHOG_NAME`/`_SMTP_PORT`/`_HTTP_PORT`, `REDIS_NAME`/`REDIS_PORT`,
+`KEYCLOAK_NAME`/`_PORT`/`_IMAGE`, `SKIP_CONSOLE_BUILD=1`); the defaults keep the
+run clear of the reference's own dev stack. The server it boots uses the manual
+billing provider, SMTP pointed at MailHog, the in-process worker (outbox
+dispatch drives the invoice mail) and local-disk storage.
 
-`sso.spec.ts` self-skips without `E2E_KEYCLOAK=1`; it belongs to milestone 7.
+`KEYCLOAK=1` additionally starts `quay.io/keycloak/keycloak:26.0` with the
+reference's dev realm and runs `sso.spec.ts` too (it self-skips without
+`E2E_KEYCLOAK=1`). The reference tree is read-only, so the realm is **copied**
+and the copy gains two things: this run's redirect URIs and web origins (the
+shipped realm only knows the reference's 8000/3000), and a login theme
+(`scripts/keycloak-theme`) whose only job is to make Keycloak's own login form
+reachable by the spec's locators — see "Where this port deliberately differs".
 
 The console needs three things conformance does not exercise, all of which this
 server already does: CORS for the console origin **with credentials** and
@@ -372,8 +503,19 @@ Those are the credentials the console journeys' operator fixture uses.
   `bucket_of` plus rollout monotonicity and spread, storage key validation and
   traversal, both backends' put/get/head/delete, the presigned URL shape, the
   `whsec_` secret and the `HttpUrl` acceptance set, and the endpoint read that
-  must never carry a secret) and the probe controller. No database needed; the
-  DB-backed suites are skipped.
+  must never carry a secret) and the probe controller, plus the milestone-7
+  ones: the cache's three correctness rules (version-at-read,
+  delete-is-a-bump, scoped bodies missing on any scope bump) and its deferred
+  invalidation; the rate-limit window, its problem document, and the whole
+  client-IP/XFF trust matrix including IPv6 and the production ceilings; the
+  generated FGA model against a fixture of the reference's own `render_dsl()`
+  output, plus `desiredTuples` and the client's tolerance of duplicate writes
+  and missing deletes; backend dispatch (rbac never asks, openfga asks with the
+  catalog relation, decisions cached per `{user}:{object}`, both fail modes, an
+  outage never cached); and the OIDC matrix against a stub realm — good token,
+  wrong issuer, wrong audience, expired, unknown signer, missing claim, nonce
+  mismatch, and a JWKS that is cached then refetched exactly once on a rotated
+  `kid`. No database needed; the DB-backed suites are skipped.
 - `pnpm test:db` — additionally runs the supertest journeys in
   `test/integration/` (shared bootstrap in `harness.ts`): `journey.test.ts`
   (register → org → invite → accept → roles → API keys → operator suspension →
@@ -418,7 +560,23 @@ Those are the credentials the console journeys' operator fixture uses.
   documented password, only the owner a platform admin, every member active in
   `acme` with its own role, the free subscription the create-org path
   bootstraps, the `limit:users` grant covering all five demo users, and a second
-  run being a no-op) rounds out the DB-backed suites.
+  run being a no-op), `auth-rate-limit.test.ts` (the identity bucket tripping
+  with `Retry-After`, one blocked account never blocking another from the same
+  IP, casing buying no extra attempts, non-auth routes untouched, the peeked
+  body still reaching the handler and a malformed one still yielding 422),
+  `oidc-login.test.ts` (start → stub realm → callback: an SSO-only user created
+  with no password hash, the cookie minting a real session, single-use state,
+  subject- and verified-email linking, an unverified email refused, a sanitised
+  `return_to`, and the SSO-only account's password login pointing at
+  `/v1/auth/oidc/start`), `plan-sync.test.ts` (the dry run touching nothing,
+  `--apply` creating a product and price per paid plan and merging the ids into
+  `provider_refs` beside another provider's) and `openfga-parity.test.ts`
+  (skipped without `SYNAPSE_OPENFGA_URL`; it creates its own store, then checks
+  every system role × permission against RBAC, project inheritance and explicit
+  sharing, a route actually gated by the store, tuple convergence through the
+  worker consumer after a role change and after a custom-role edit, an API key
+  working while the store is bypassed, and both fail modes against a dead port)
+  round out the DB-backed suites.
   Every table of that database is truncated first — never point it at data you
   care about. `SYNAPSE_TEST_TENANT_ISOLATION=app_and_rls` runs them with RLS
   bindings on (requires connecting as an RLS-subject role).
@@ -430,7 +588,7 @@ reference's `postgresql+asyncpg://` DSN form is accepted):
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `SYNAPSE_ENV` | `development` | `production` enforces the guardrails (no dev secret) |
+| `SYNAPSE_ENV` | `development` | `production` enforces the guardrails (no dev secret, auth limits under their ceilings) |
 | `SYNAPSE_SECRET_KEY` | dev default | HS256 key for access tokens (shared with the reference ⇒ interchangeable tokens) |
 | `SYNAPSE_DATABASE_URL` | `postgresql://synapse:synapse@localhost:5433/synapse` | Postgres DSN (`SYNAPSE_DB_POOL_SIZE`, default 10) |
 | `SYNAPSE_TENANT_ISOLATION` | `app` | `app` or `app_and_rls` (RLS GUCs bound per transaction) |
@@ -462,6 +620,17 @@ reference's `postgresql+asyncpg://` DSN form is accepted):
 | `SYNAPSE_ACCESS_TOKEN_TTL_MINUTES` | `15` | access token lifetime |
 | `SYNAPSE_REFRESH_TOKEN_TTL_DAYS` | `30` | refresh token lifetime |
 | `SYNAPSE_REFRESH_REUSE_GRACE_SECONDS` | `10` | replay window for a rotated refresh token before the chain is revoked |
+| `SYNAPSE_REDIS_URL` | `` | the shared cache / rate-limit store; unset ⇒ caches always miss and the limiter counts per process |
+| `SYNAPSE_TRUSTED_PROXIES` | `` | CIDRs whose `X-Forwarded-For` is trusted (CSV or JSON); empty ⇒ the header is ignored |
+| `SYNAPSE_AUTH_RATE_LIMIT_PER_IP` | `20` | auth attempts per window per client IP (production ceiling 100) |
+| `SYNAPSE_AUTH_RATE_LIMIT_PER_IDENTITY` | `5` | auth attempts per window per target identity (production ceiling 20) |
+| `SYNAPSE_AUTH_RATE_WINDOW_SECONDS` | `60` | the fixed window both buckets count in |
+| `SYNAPSE_AUTHZ_BACKEND` | `rbac` | `openfga` sends permission checks to the store; RBAC stays the source of truth either way |
+| `SYNAPSE_OPENFGA_URL` / `_STORE_ID` / `_MODEL_ID` / `_API_TOKEN` | `` | the store; an empty model id means its latest |
+| `SYNAPSE_OPENFGA_FAIL_MODE` | `closed` | on an outage: `closed` denies, `rbac` falls back (organization objects only) |
+| `SYNAPSE_KEYCLOAK_BASE_URL` / `_REALM` / `_CLIENT_ID` / `_CLIENT_SECRET` | `` | the OIDC client, used when `SYNAPSE_IDENTITY_PROVIDER=keycloak` |
+| `SYNAPSE_KEYCLOAK_ALLOW_PASSWORD_GRANT` | `false` | allow email+password to be proxied to Keycloak; the code flow is the default |
+| `SYNAPSE_OIDC_REDIRECT_URI` | derived | the callback as Keycloak must see it; set it behind a proxy that rewrites scheme/host |
 | `SYNAPSE_MIGRATE_ON_START` / `SYNAPSE_SEED_ON_START` | `true` | boot-time migrations / seed |
 | `SYNAPSE_BOOTSTRAP_ADMIN_EMAIL` / `SYNAPSE_BOOTSTRAP_ADMIN_PASSWORD` | unset | create-or-promote the platform admin at boot |
 | `PORT` | `8080` | listen port |
@@ -475,12 +644,17 @@ src/
   app.module.ts           ClsModule + route-family modules; global problem filter + validation pipe
   api/                    probes + /v1/meta
   core/                   config (zod), errors (problem documents), problem.filter, request-context (CLS),
-                          db/ (Database + Tx with RLS GUCs, migration runner), ids, events, outbox, audit,
-                          security (argon2id, HS256, opaque tokens), pagination, validation
+                          db/ (Database + Tx with RLS GUCs + post-commit actions, migration runner), ids,
+                          events, outbox, audit, security (argon2id, HS256, opaque tokens), pagination,
+                          validation, ip (CIDR arithmetic), rate-limiter (fixed window),
+                          cache/ (VersionedCache, the Redis / pass-through / in-process TTL backends, registry)
   identity/               /v1/auth: DTOs, users + tokens repositories, service, AuthGuard (JWT + sk_ keys),
-                          refresh cookie, platform-admin bootstrap
+                          refresh cookie, platform-admin bootstrap,
+                          rate-limit/ (client-ip + the two-phase middleware),
+                          oidc/ (pkce, jwks, the Keycloak provider + the local seam, /v1/auth/oidc/*)
   tenancy/                /v1/orgs, /v1/memberships: repositories, service, TenantGuard, PlatformAdminGuard
   authorization/          the RBAC engine (catalog, roles repository, service, PermissionsGuard, seed)
+                          + fga/ (the catalog-generated model, the HTTP client, the tuple sync)
                           + the /v1/roles + /v1/permissions route family (RolesModule)
   api-keys/               /v1/api-keys: repository, service, controller
   subscriptions/          catalog (plans.yaml → validated model), catalog-sync (→ tables), state-machine,
@@ -494,7 +668,8 @@ src/
                           paddle, xendit, paymongo over injected fetch), registry, billing-customers
                           repository, BillingService (customers, checkout, portal, plan change),
                           invoicing/ (repository, numbering + state machine, engine, pdfkit renderer),
-                          reporting/, webhooks/ (raw-body ingest + idempotency ledger) — engine:
+                          reporting/, webhooks/ (raw-body ingest + idempotency ledger),
+                          plan-catalog-push (the catalog → a provider's products/prices) — engine:
                           BillingModule, routes: BillingRoutesModule
   webhooks/               outbound delivery: envelope + ladders, Fernet codec, signer, deliveries
                           repository, WebhookDeliveryService (WebhooksModule)
@@ -509,8 +684,10 @@ src/
   worker/                 advisory lock, outbox repository, JobsService (the seven jobs), the @Cron/@Interval
                           cadence (WorkerModule), and worker.ts (standalone entrypoint)
   seeds/                  dev-seed (the demo org + one user per system role) — CLI-only, never in the served graph
-  cli/                    migrate, seed, seed-dev, plans-sync, jobs-run-once
-scripts/e2e-console.sh        milestone-6 recipe: the reference console's journeys against this server
+  cli/                    migrate, seed, seed-dev, plans-sync, authz-fga, jobs-run-once
+scripts/e2e-console.sh        the reference console's journeys against this server (KEYCLOAK=1 adds SSO)
+scripts/keycloak-realm.py     copies the reference's dev realm and adds this run's origins
+scripts/keycloak-theme/       the stock Keycloak login page with one relabelled control
 config/plans.yaml             the plan catalog, verbatim from the reference
 migrations/001_baseline.sql   = contracts/schema-v1.sql (applied by the raw-SQL runner)
 contracts/                    snapshot of the reference contract (openapi, events, problems, changelog)
@@ -524,7 +701,10 @@ on top and `Webhooks` beside `Core`. Engines never import route modules;
 `storage_bytes` gauge and `Entitlements` for the `api_access` gate; `Worker`
 imports `Usage` plus the files repository so `purge_expired` can hand back the
 bytes an abandoned presigned upload reserved; `Billing` never imports
-`Notifications` (mail is a post-commit consumer the worker drives).
+`Notifications` (mail is a post-commit consumer the worker drives). The FGA
+tuple sync lives in `Authorization` and reads memberships with its own two
+queries rather than importing `MembershipsRepository`, which would close the
+`Tenancy → Authorization` edge into a cycle.
 
 ## Where this port deliberately differs from the reference server
 
@@ -532,9 +712,36 @@ The reference adopted this port's milestone-2 findings in `synapse-saas@4de2026`
 (problem documents for unknown routes and wrong methods, `switch-org` 200 in the
 contract, 409 `conflict` for duplicate invites and role keys, invite `role_keys`
 and organization name, IP-literal hosts, `check_function_bodies` in the
-baseline), so observable behaviour is aligned. Remaining differences are
-internal: entitlements and feature flags are not cached (resolved per request,
-with the reference's invalidation points marked).
+baseline), so observable behaviour is aligned.
+
+Milestone 7 turned up three things, two of which the reference adopted while
+this port was being written:
+
+- **Tuple sync converged only through the worker.** Under
+  `SYNAPSE_AUTHZ_BACKEND=openfga` with the default `closed` fail mode, that
+  denied the owner of a brand-new organization for the outbox interval plus the
+  decision-cache TTL — 22 of the 51 conformance tests failed. `create_organization`
+  additionally queued nothing at all, so that owner stayed denied until someone
+  ran `authz fga sync` by hand. Both servers now queue the sync on every
+  membership change **and** converge eagerly after COMMIT: the outbox event
+  stays the guarantee (retries, dead-lettering, and it is what ADR 0009
+  describes), while the immediate attempt is what makes the contract hold. It
+  runs after the commit, so a slow or dead store costs a log line and nothing
+  else. The reference carries it as
+  `TestEagerConvergence::test_new_owner_is_allowed_before_any_worker_pass`.
+- **`apps/web/e2e/sso.spec.ts` could not reach the password field.** It used
+  `getByLabel(/password/i)`, and every Keycloak from 22.0 to 26.0 labels the
+  password-visibility toggle `aria-label="Show password"` — two matches,
+  Playwright strict mode, a failing test on any image the reference's own
+  nightly `e2e-sso` job would use. The spec is now anchored (`/^password$/i`).
+- **A login theme is still needed to run it, and this port ships one.** The
+  anchored locator matches nothing against the stock `keycloak` theme, which
+  wraps each label's text in a PatternFly `<span>` on its own line. The
+  reference tree is read-only and the spec is never edited, so the realm
+  **copy** points at `scripts/keycloak-theme`: Keycloak's own unstyled `base`
+  login page (same form, same endpoints, label text exactly `Password`) with
+  the toggle relabelled so either spelling of the locator resolves to one
+  element.
 
 Two places where this port is deliberately *stricter* than the reference, both
 invisible to the contract:

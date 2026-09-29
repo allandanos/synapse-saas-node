@@ -30,6 +30,8 @@ export interface IdentityProvider {
   readonly name: string;
   authorizationUrl(input: AuthorizationUrlInput): string;
   exchangeCode(code: string, input: ExchangeInput): Promise<VerifiedClaims>;
+  /** Opt-in resource-owner password grant; absent (or null) means the password form cannot sign in. */
+  verifyCredentials?(email: string, password: string): Promise<VerifiedClaims | null>;
 }
 
 /**

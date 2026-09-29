@@ -86,7 +86,9 @@ export class FgaClient {
       try {
         await this.post(this.storePath("/write"), this.withModel({ deletes: { tuple_keys: [tupleKey(tuple)] } }));
       } catch (error) {
-        if (!this.bodyOf(error).toLowerCase().includes("not found")) throw error;
+        // OpenFGA 1.x: "cannot delete a tuple which does not exist"; older builds: "not found".
+        const body = this.bodyOf(error).toLowerCase();
+        if (!body.includes("not found") && !body.includes("does not exist")) throw error;
       }
     }
   }

@@ -15,6 +15,7 @@ import { events } from "../core/events";
 import { OutboxWriter } from "../core/outbox";
 import { DUMMY_PASSWORD_HASH, SecurityService } from "../core/security";
 import { MembershipsRepository } from "../tenancy/memberships.repository";
+import { IDENTITY_PROVIDER, type IdentityProvider } from "./oidc/identity-provider";
 import { TokensRepository } from "./tokens.repository";
 import { type UserRead, type UserRow, UsersRepository, toUserRead } from "./users.repository";
 
@@ -66,6 +67,7 @@ export class IdentityService {
     private readonly members: MembershipsRepository,
     private readonly audit: AuditWriter,
     private readonly outbox: OutboxWriter,
+    @Inject(IDENTITY_PROVIDER) private readonly provider: IdentityProvider,
   ) {}
 
   // ── Registration / login ────────────────────────────────────────────────────
@@ -85,7 +87,13 @@ export class IdentityService {
 
   async login(input: { email: string; password: string }, meta: RequestMeta): Promise<AuthResponse> {
     const user = await this.db.transaction((tx) => this.users.findByEmail(tx, input.email));
-    if (user && user.identity_provider !== "local" && user.password_hash === null) {
+    const ssoOnly = Boolean(user && user.identity_provider !== "local" && user.password_hash === null);
+    if (this.settings.SYNAPSE_KEYCLOAK_ALLOW_PASSWORD_GRANT && this.settings.SYNAPSE_IDENTITY_PROVIDER === "keycloak" && (!user || ssoOnly)) {
+      // Opt-in ROPC (ADR 0010): the password form proxies to Keycloak, which
+      // links or creates the account; the code flow stays the default.
+      return this.loginViaPasswordGrant(input.email, input.password, meta);
+    }
+    if (ssoOnly && user) {
       // SSO-only account: the password form cannot sign it in — point at the flow that can
       await this.security.verifyPassword(input.password, DUMMY_PASSWORD_HASH);
       throw new AuthenticationError("This account signs in with single sign-on", {
@@ -106,6 +114,20 @@ export class IdentityService {
     return this.db.transaction(async (tx) => {
       await this.users.touchLastLogin(tx, user.id);
       await this.audit.log(tx, { eventType: events.USER_LOGIN_SUCCEEDED, actorUserId: user.id });
+      const { pair } = await this.issueTokens(tx, user, meta);
+      return { user: toUserRead({ ...user, last_login_at: new Date() }), tokens: pair };
+    });
+  }
+
+  /** The password grant's login path: Keycloak verifies, we link or create. */
+  private async loginViaPasswordGrant(email: string, password: string, meta: RequestMeta): Promise<AuthResponse> {
+    const claims = (await this.provider.verifyCredentials?.(email, password)) ?? null;
+    if (claims === null) throw new InvalidCredentialsError("Invalid email or password");
+    return this.db.transaction(async (tx) => {
+      const user = await this.linkOrCreateOidcUser(tx, claims, this.provider.name);
+      if (!user.is_active) throw new InvalidCredentialsError("Invalid email or password");
+      await this.users.touchLastLogin(tx, user.id);
+      await this.audit.log(tx, { eventType: events.USER_LOGIN_SUCCEEDED, actorUserId: user.id, diff: { via: `${this.provider.name}_password_grant` } });
       const { pair } = await this.issueTokens(tx, user, meta);
       return { user: toUserRead({ ...user, last_login_at: new Date() }), tokens: pair };
     });
