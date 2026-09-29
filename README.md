@@ -18,7 +18,7 @@ that commit; re-copy when the reference's `contracts/CHANGELOG.md` gains an entr
 | 3 | subscriptions, entitlements, usage | **done** — `test_subscriptions` (4/4), `test_usage_and_entitlements` (8/8), `test_api_keys` fully, no milestone-2 regression (`pnpm conformance:m3`) |
 | 4 | billing providers, invoicing, notifications, worker | **done** — `test_billing` (6/6) plus no milestone 1–3 regression (`pnpm conformance:m4`) |
 | 5 | webhooks, files, flags, audit, agents | **done** — `test_webhooks`, `test_files`, `test_feature_flags`, `test_audit`, `test_agents` pass and the **whole** reference suite is green (51/51, `pnpm conformance`) |
-| 6 | console parity (Playwright) | — |
+| 6 | console parity (Playwright) | **done** — the reference console, unmodified, built against this port: **22 passed, 1 skipped** (`sso.spec.ts` needs Keycloak — milestone 7), conformance still 51/51 (`pnpm e2e:console`) |
 | 7 | OIDC + OpenFGA, hardening | — |
 
 A milestone is done when the corresponding `tests/conformance` modules pass
@@ -300,6 +300,55 @@ server needs `SYNAPSE_BILLING_PROVIDER=manual`, the bootstrap-admin variables
 below, and a writable `SYNAPSE_STORAGE_ROOT` (the file journeys run on the
 local-disk backend; the S3 path is covered by `pnpm test:db`).
 
+### Console parity
+
+The reference ships the product console (`apps/web`, Next.js) with five
+Playwright journey files. Milestone 6 is the gate that the **unmodified**
+console — same source, same specs — works against this port:
+
+```bash
+pnpm e2e:console            # 22 passed, 1 skipped
+pnpm e2e:console e2e/billing.spec.ts   # arguments go through to playwright
+```
+
+`scripts/e2e-console.sh` does the whole loop and tears everything down after:
+a MailHog container, a copy of the reference console built with
+`NEXT_PUBLIC_API_URL` pointing at this server, a freshly created database,
+`pnpm migrate && pnpm seed:dev`, the API, the console, then
+`playwright test`. Every resource is overridable from the environment
+(`REFERENCE_WEB`, `CONSOLE_DIR`, `CONSOLE_PORT`, `API_PORT`, `DATABASE_URL`,
+`PG_CONTAINER`, `MAILHOG_NAME`/`_SMTP_PORT`/`_HTTP_PORT`, `SKIP_CONSOLE_BUILD=1`);
+the defaults keep the run clear of the reference's own dev stack. The server it
+boots uses the manual billing provider, SMTP pointed at MailHog, the in-process
+worker (outbox dispatch drives the invoice mail) and local-disk storage.
+
+`sso.spec.ts` self-skips without `E2E_KEYCLOAK=1`; it belongs to milestone 7.
+
+The console needs three things conformance does not exercise, all of which this
+server already does: CORS for the console origin **with credentials** and
+`X-Total-Count` exposed (`configureHttp` in `src/main.ts`), the `synapse_rt`
+refresh cookie (HttpOnly, `SameSite=Lax`, `Path=/`, and `Secure` only for an
+https origin or production — `src/identity/refresh-cookie.ts`), and a
+`POST /v1/auth/refresh` that accepts the cookie with an empty body.
+
+**Console-visible differences: none.** One was found and closed — see
+"Where this port deliberately differs" for the invoice-attachment MIME.
+
+### Dev seed
+
+```bash
+pnpm seed:dev     # system seed + plan catalog, then the demo org
+```
+
+`src/seeds/dev-seed.ts` mirrors the reference's `seeds/dev_seed.py`: the org
+**Acme Corporation** (slug `acme`) created through the normal create-org path
+(free subscription, seat gauge, `org.created`), owned by
+`owner@acme.example.com` — a platform admin — plus `admin@`, `billing@`,
+`developer@` and `member@acme.example.com`, each invited with its own system
+role and auto-accepted. Password for all five: `password123`. Idempotent (the
+owner's presence is the marker) and refused when `SYNAPSE_ENV=production`.
+Those are the credentials the console journeys' operator fixture uses.
+
 ### Tests
 
 - `pnpm test` — unit tests for the pure logic (permission catalog + role
@@ -360,6 +409,10 @@ local-disk backend; the S3 path is covered by `pnpm test:db`).
   emitting anything) against
   `SYNAPSE_TEST_DATABASE_URL`
   (default `postgresql://synapse:synapse@localhost:5434/synapse_node_test`).
+  `dev-seed.test.ts` (one user per system role, all logging in with the
+  documented password, only the owner a platform admin, every member active in
+  `acme` with its own role, the free subscription the create-org path
+  bootstraps, and a second run being a no-op) rounds out the DB-backed suites.
   Every table of that database is truncated first — never point it at data you
   care about. `SYNAPSE_TEST_TENANT_ISOLATION=app_and_rls` runs them with RLS
   bindings on (requires connecting as an RLS-subject role).
@@ -449,7 +502,9 @@ src/
   notifications/          Notifier seam, SMTP + Noop transports, outbox-event handlers (NotificationsModule)
   worker/                 advisory lock, outbox repository, JobsService (the seven jobs), the @Cron/@Interval
                           cadence (WorkerModule), and worker.ts (standalone entrypoint)
-  cli/                    migrate, seed, plans-sync, jobs-run-once
+  seeds/                  dev-seed (the demo org + one user per system role) — CLI-only, never in the served graph
+  cli/                    migrate, seed, seed-dev, plans-sync, jobs-run-once
+scripts/e2e-console.sh        milestone-6 recipe: the reference console's journeys against this server
 config/plans.yaml             the plan catalog, verbatim from the reference
 migrations/001_baseline.sql   = contracts/schema-v1.sql (applied by the raw-SQL runner)
 contracts/                    snapshot of the reference contract (openapi, events, problems, changelog)
@@ -484,6 +539,19 @@ invisible to the contract:
   says money is integer minor units end to end.
 - **`verifyWebhook` always rejects through a promise** rather than throwing
   synchronously, so a caller cannot miss a refusal by forgetting to await.
+
+Milestone 6 turned up one console-visible difference, now closed here:
+
+- **Invoice attachment MIME.** The reference composes mail with Python's
+  `EmailMessage.add_attachment` (`notifications/smtp.py:62`), which emits a bare
+  `Content-Type: application/pdf`, then `Content-Transfer-Encoding`, then a
+  **quoted** `filename`, then a per-part `MIME-Version: 1.0`. The console's
+  `e2e/invoice-email.spec.ts:89-92` matches that part with an anchored regex, so
+  the spelling is observable. nodemailer composes its own (`; name=` on the
+  content type, an unquoted filename, no per-part `MIME-Version`) and failed it;
+  `rawAttachmentPart` in `src/notifications/smtp.notifier.ts` now builds the part
+  and hands nodemailer the source verbatim. `test/unit/notifications.test.ts`
+  pins it against the console's own regex.
 
 This port's milestone-5 findings were adopted by the reference in
 `synapse-saas@6272ab3`, and the conformance suite now asserts them, so the
