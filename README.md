@@ -6,7 +6,7 @@ in [`synapse-saas`](../synapse-saas) — see its
 [ADR 0012](../synapse-saas/docs/adr/0012-polyglot-ports-contract-first.md) and
 [porting guide](../synapse-saas/ports/README.md).
 
-**Contract pinned at:** `synapse-saas@295672b` (`contracts/` is a snapshot of
+**Contract pinned at:** `synapse-saas@cd55a53` (`contracts/` is a snapshot of
 that commit; re-copy when the reference's `contracts/CHANGELOG.md` gains an entry).
 
 ## Status
