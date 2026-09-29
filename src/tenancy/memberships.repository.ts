@@ -123,6 +123,14 @@ export class MembershipsRepository {
     return tx.one<MembershipRow>(`${MEMBERSHIP_SELECT} WHERE m.id = $1`, [membershipId]);
   }
 
+  /** The pending invite for an address — the dev seed's auto-accept path (reference `find_pending_invite`). */
+  findPendingInviteByEmail(tx: Tx, organizationId: string, email: string): Promise<MembershipRow | undefined> {
+    return tx.one<MembershipRow>(`${MEMBERSHIP_SELECT} WHERE m.organization_id = $1 AND m.invited_email = $2 AND m.status = 'invited'`, [
+      organizationId,
+      email,
+    ]);
+  }
+
   findInvitedByTokenHash(tx: Tx, tokenHash: string): Promise<MembershipRow | undefined> {
     return tx.one<MembershipRow>(`${MEMBERSHIP_SELECT} WHERE m.invite_token_hash = $1 AND m.status = 'invited'`, [tokenHash]);
   }

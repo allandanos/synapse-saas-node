@@ -13,6 +13,7 @@ import { SETTINGS, type Settings } from "../../src/core/config";
 import { MigrationRunner } from "../../src/core/db/migrations";
 import { PlatformAdminBootstrap } from "../../src/identity/platform-admin.bootstrap";
 import { configureHttp } from "../../src/main";
+import { SeedsModule } from "../../src/seeds/seeds.module";
 import { PlanCatalogSync } from "../../src/subscriptions/catalog-sync";
 
 /**
@@ -57,7 +58,8 @@ export async function startHarness(): Promise<Harness> {
   // The journeys drive `JobsService` explicitly; the in-process cadence would
   // otherwise race them (and keep timers alive past the suite).
   process.env.SYNAPSE_WORKER_ENABLED = "false";
-  const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
+  // SeedsModule is CLI-only in production; the harness adds it so the dev-seed suite can resolve it.
+  const moduleRef = await Test.createTestingModule({ imports: [AppModule, SeedsModule] }).compile();
   const app = moduleRef.createNestApplication<NestExpressApplication>({ bodyParser: false });
   configureHttp(app, app.get<Settings>(SETTINGS));
   await app.get(MigrationRunner).run();

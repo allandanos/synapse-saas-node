@@ -157,10 +157,19 @@ export class TenancyService {
    * Invite by email: the token rides the internal outbox event only, never the
    * response. The `users` seat limit is enforced inside the same transaction as the insert.
    */
-  inviteMember(input: { organizationId: string; email: string; roleKeys?: string[]; organizationName: string }): Promise<MembershipRead> {
+  inviteMember(input: {
+    organizationId: string;
+    email: string;
+    roleKeys?: string[];
+    organizationName: string;
+    /** The seed populates a demo org past the free plan's seats; the reference
+     * bypasses the same way (`invite_member(seat_limit=None)`). Always true over HTTP. */
+    enforceSeatLimit?: boolean;
+  }): Promise<MembershipRead> {
     const roleKeys = input.roleKeys && input.roleKeys.length > 0 ? input.roleKeys : [SYSTEM_ROLE_MEMBER];
+    const enforceSeatLimit = input.enforceSeatLimit ?? true;
     return this.db.transaction(async (tx) => {
-      const seatLimit = (await this.entitlements.effectiveForOrg(tx, input.organizationId)).limitValue("users");
+      const seatLimit = enforceSeatLimit ? (await this.entitlements.effectiveForOrg(tx, input.organizationId)).limitValue("users") : null;
       const active = await this.members.countByStatus(tx, input.organizationId, "active");
       const pending = await this.members.countByStatus(tx, input.organizationId, "invited");
       if (seatLimit !== null && active + pending + 1 > seatLimit) {
@@ -220,25 +229,43 @@ export class TenancyService {
       await tx.bindTenant(organizationId);
       const membership = await this.members.findInvitedByTokenHash(tx, tokenHash);
       if (!membership) throw new InviteNotFoundError("Invite not found or already used");
-
-      await this.members.accept(tx, membership.id, user.userId, user.email);
-      await this.audit.log(tx, {
-        eventType: events.MEMBER_JOINED,
-        organizationId,
-        targetType: "membership",
-        targetId: membership.id,
-        diff: { email: user.email },
-      });
-      await this.outbox.append(tx, {
-        eventType: events.MEMBER_JOINED,
-        aggregateType: "membership",
-        aggregateId: membership.id,
-        organizationId,
-        payload: { email: user.email },
-      });
-      await this.syncSeatGauge(tx, organizationId);
+      await this.acceptMembership(tx, organizationId, membership.id, user);
       return { organization_id: organizationId, status: "active" };
     });
+  }
+
+  /**
+   * Accept the pending invite for an address without its token — the seeding
+   * path only (reference `accept_invite_by_email`), never an HTTP route.
+   */
+  acceptInviteByEmail(organizationId: string, user: { userId: string; email: string }): Promise<{ organization_id: string; status: string }> {
+    return this.db.transaction(async (tx) => {
+      await tx.bindTenant(organizationId);
+      const membership = await this.members.findPendingInviteByEmail(tx, organizationId, user.email);
+      if (!membership) throw new InviteNotFoundError("No pending invite for this email");
+      await this.acceptMembership(tx, organizationId, membership.id, user);
+      return { organization_id: organizationId, status: "active" };
+    });
+  }
+
+  /** Flip an invited membership to active and emit the audit + outbox pair once. */
+  private async acceptMembership(tx: Tx, organizationId: string, membershipId: string, user: { userId: string; email: string }): Promise<void> {
+    await this.members.accept(tx, membershipId, user.userId, user.email);
+    await this.audit.log(tx, {
+      eventType: events.MEMBER_JOINED,
+      organizationId,
+      targetType: "membership",
+      targetId: membershipId,
+      diff: { email: user.email },
+    });
+    await this.outbox.append(tx, {
+      eventType: events.MEMBER_JOINED,
+      aggregateType: "membership",
+      aggregateId: membershipId,
+      organizationId,
+      payload: { email: user.email },
+    });
+    await this.syncSeatGauge(tx, organizationId);
   }
 
   updateMembership(membershipId: string, organizationId: string, patch: { roleKeys?: string[] | null; status?: string | null }): Promise<MembershipRead> {
