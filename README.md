@@ -35,8 +35,13 @@ OpenFGA 1.x delete wording, the dead `SYNAPSE_KEYCLOAK_ALLOW_PASSWORD_GRANT`
 setting and the SSO spec's password locator — so all of them are aligned
 rather than carried; see "Where this port deliberately differs".
 
-Nothing is deferred: every contract surface, both authorization backends, the
-Redis caches, auth rate limiting, SSO and provider plan sync are in.
+Nothing on the contract is deferred: every surface, both authorization
+backends, the Redis caches, auth rate limiting, SSO and provider plan sync are
+in. The one reference feature this port has never carried is the Prometheus
+`/metrics` endpoint and its counters (`core/metrics.py`) — no conformance test
+or console journey reads them, and the events they count are logged here. The
+FGA check outcome that the reference records as
+`synapse_fga_checks_total{outcome}` is a log line instead.
 
 ## Stack
 
