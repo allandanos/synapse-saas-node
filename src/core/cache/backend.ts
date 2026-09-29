@@ -60,3 +60,59 @@ export class PassThroughBackend implements CacheBackend {
     return Promise.resolve();
   }
 }
+
+/**
+ * A per-process TTL map. Used ONLY where the "cache" is really short-lived
+ * state that cannot be recomputed — the OIDC login attempt (PKCE verifier +
+ * nonce) — and only when no Redis is configured. Single-worker by nature: a
+ * multi-process deployment without Redis would send the browser back to a
+ * worker that never saw its `state`, so production configures Redis.
+ */
+export class InProcessTtlBackend implements CacheBackend {
+  readonly configured = false;
+  private readonly store = new Map<string, { expiresAt: number; value: string }>();
+
+  get(key: string): Promise<string | null> {
+    const entry = this.store.get(key);
+    if (!entry) return Promise.resolve(null);
+    if (entry.expiresAt < Date.now()) {
+      this.store.delete(key);
+      return Promise.resolve(null);
+    }
+    return Promise.resolve(entry.value);
+  }
+
+  set(key: string, value: string, ttlSeconds: number): Promise<void> {
+    this.sweep();
+    this.store.set(key, { expiresAt: Date.now() + ttlSeconds * 1000, value });
+    return Promise.resolve();
+  }
+
+  incr(key: string, ttlSeconds: number): Promise<number> {
+    const current = this.store.get(key);
+    const next = Number(current && current.expiresAt >= Date.now() ? current.value : "0") + 1;
+    this.store.set(key, { expiresAt: Date.now() + ttlSeconds * 1000, value: String(next) });
+    return Promise.resolve(next);
+  }
+
+  incrWindow(key: string, windowSeconds: number): Promise<[number, number]> {
+    const now = Math.floor(Date.now() / 1000);
+    const bucket = `${key}:${String(Math.floor(now / windowSeconds))}`;
+    return this.incr(bucket, windowSeconds).then((count) => [count, windowSeconds - (now % windowSeconds)]);
+  }
+
+  ping(): Promise<void> {
+    return Promise.reject(new Error("redis is not configured"));
+  }
+
+  close(): Promise<void> {
+    this.store.clear();
+    return Promise.resolve();
+  }
+
+  /** Expired entries would otherwise pile up: an abandoned login is the common case. */
+  private sweep(): void {
+    const now = Date.now();
+    for (const [key, entry] of this.store) if (entry.expiresAt < now) this.store.delete(key);
+  }
+}

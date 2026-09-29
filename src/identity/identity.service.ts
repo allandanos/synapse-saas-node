@@ -111,6 +111,70 @@ export class IdentityService {
     });
   }
 
+  // ── SSO (OIDC) ──────────────────────────────────────────────────────────────
+
+  /**
+   * Resolve an OIDC identity to a local user, in this order:
+   *
+   * 1. by `(identity_provider, provider_subject)` — the stable link;
+   * 2. else by email, ONLY when the provider asserts `email_verified` — an
+   *    unverified email must never take over an existing local account;
+   * 3. else create an SSO-only user (no local password).
+   *
+   * An existing account whose email the IdP has NOT verified is refused
+   * outright rather than merged.
+   */
+  linkOrCreateOidcUser(tx: Tx, claims: Record<string, unknown>, provider = "keycloak"): Promise<UserRow> {
+    const subject = String(claims.sub ?? "");
+    if (!subject) throw new AuthenticationError("OIDC claims carry no subject");
+    const email = String(claims.email ?? "")
+      .trim()
+      .toLowerCase();
+    const displayName = String(claims.name ?? claims.preferred_username ?? email ?? subject);
+    return this.resolveOidcUser(tx, { provider, subject, email, displayName, emailVerified: claims.email_verified === true });
+  }
+
+  private async resolveOidcUser(
+    tx: Tx,
+    input: { provider: string; subject: string; email: string; displayName: string; emailVerified: boolean },
+  ): Promise<UserRow> {
+    const bySubject = await this.users.findByProviderSubject(tx, input.provider, input.subject);
+    if (bySubject) {
+      if (!bySubject.is_active) throw new AuthenticationError("User is inactive");
+      await this.users.touchLastLogin(tx, bySubject.id);
+      await this.audit.log(tx, { eventType: events.USER_LOGIN_SUCCEEDED, actorUserId: bySubject.id, diff: { via: input.provider } });
+      return { ...bySubject, last_login_at: new Date() };
+    }
+
+    const existing = input.email ? await this.users.findByEmail(tx, input.email) : undefined;
+    if (existing && input.emailVerified) {
+      if (!existing.is_active) throw new AuthenticationError("User is inactive");
+      await this.users.linkProvider(tx, existing.id, input.provider, input.subject);
+      await this.users.touchLastLogin(tx, existing.id);
+      await this.audit.log(tx, {
+        eventType: events.USER_LOGIN_SUCCEEDED,
+        actorUserId: existing.id,
+        diff: { via: input.provider, linked: "verified_email" },
+      });
+      return { ...existing, identity_provider: input.provider, provider_subject: input.subject, last_login_at: new Date() };
+    }
+
+    if (!input.email) throw new AuthenticationError("OIDC claims carry no email; cannot create a user");
+    if (existing) {
+      // Same email, unverified at the IdP: refuse rather than merge accounts
+      throw new AuthenticationError("An account with this email exists; verify the email at your identity provider first", { reason: "email_unverified" });
+    }
+    const user = await this.users.insert(tx, {
+      email: input.email,
+      passwordHash: null, // SSO-only: the password form cannot sign it in
+      displayName: input.displayName,
+      identityProvider: input.provider,
+      providerSubject: input.subject,
+    });
+    await this.audit.log(tx, { eventType: events.USER_REGISTERED, actorUserId: user.id, diff: { via: input.provider } });
+    return user;
+  }
+
   // ── Tokens ──────────────────────────────────────────────────────────────────
 
   async issueTokens(

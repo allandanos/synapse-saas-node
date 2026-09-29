@@ -52,14 +52,31 @@ export class UsersRepository {
     return tx.one<UserRow>(`SELECT ${COLUMNS} FROM users WHERE id = $1`, [id]);
   }
 
+  /** The stable SSO link: (identity_provider, provider_subject). */
+  findByProviderSubject(tx: Tx, provider: string, subject: string): Promise<UserRow | undefined> {
+    return tx.one<UserRow>(`SELECT ${COLUMNS} FROM users WHERE identity_provider = $1 AND provider_subject = $2`, [provider, subject]);
+  }
+
+  /** Attach an SSO identity to an existing account (a verified email matched). */
+  async linkProvider(tx: Tx, id: string, provider: string, subject: string): Promise<void> {
+    await tx.query(`UPDATE users SET identity_provider = $2, provider_subject = $3, updated_at = now() WHERE id = $1`, [id, provider, subject]);
+  }
+
   async insert(
     tx: Tx,
-    user: { email: string; passwordHash: string | null; displayName: string; isPlatformAdmin?: boolean; identityProvider?: string },
+    user: {
+      email: string;
+      passwordHash: string | null;
+      displayName: string;
+      isPlatformAdmin?: boolean;
+      identityProvider?: string;
+      providerSubject?: string | null;
+    },
   ): Promise<UserRow> {
     const row = await tx.one<UserRow>(
-      `INSERT INTO users (id, email, password_hash, display_name, is_platform_admin, is_active, identity_provider)
-       VALUES ($1, $2, $3, $4, $5, true, $6) RETURNING ${COLUMNS}`,
-      [newUuid(), user.email, user.passwordHash, user.displayName, user.isPlatformAdmin ?? false, user.identityProvider ?? "local"],
+      `INSERT INTO users (id, email, password_hash, display_name, is_platform_admin, is_active, identity_provider, provider_subject)
+       VALUES ($1, $2, $3, $4, $5, true, $6, $7) RETURNING ${COLUMNS}`,
+      [newUuid(), user.email, user.passwordHash, user.displayName, user.isPlatformAdmin ?? false, user.identityProvider ?? "local", user.providerSubject ?? null],
     );
     return row as UserRow;
   }

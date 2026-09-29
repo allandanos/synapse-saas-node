@@ -1,7 +1,7 @@
 import { Inject, Injectable } from "@nestjs/common";
 import type { Settings } from "../config";
 import type { CacheBackend } from "./backend";
-import { PassThroughBackend } from "./backend";
+import { InProcessTtlBackend, PassThroughBackend } from "./backend";
 import { RedisBackend } from "./redis.backend";
 import { VersionedCache } from "./versioned-cache";
 
@@ -12,6 +12,17 @@ export const CACHE_BACKEND = Symbol("CACHE_BACKEND");
  * consumers): a namespace is a bump domain, so two features sharing one would
  * invalidate each other.
  */
+export interface CacheNamespace {
+  readonly name: string;
+  readonly ttl: number;
+  /**
+   * True when the entries are state, not a memo: losing them breaks a flow
+   * rather than costing a recomputation. Such a namespace falls back to a
+   * per-process TTL map when no Redis is configured instead of missing.
+   */
+  readonly durable?: boolean;
+}
+
 export const CACHE_NAMESPACES = {
   /** Effective permission set per (user, org) — `authorization/service.py`. */
   PERM: { name: "perm", ttl: 30 },
@@ -24,8 +35,8 @@ export const CACHE_NAMESPACES = {
   /** Membership lookups — declared by the reference (`tenancy/dependencies.py`), unused there. */
   MEMBER: { name: "member", ttl: 60 },
   /** OIDC login state (PKCE verifier + nonce), single use — `identity/router.py`. */
-  OIDC: { name: "oidc", ttl: 600 },
-} as const;
+  OIDC: { name: "oidc", ttl: 600, durable: true },
+} as const satisfies Record<string, CacheNamespace>;
 
 export function createCacheBackend(settings: Settings): CacheBackend {
   return settings.SYNAPSE_REDIS_URL ? new RedisBackend(settings.SYNAPSE_REDIS_URL) : new PassThroughBackend();
@@ -39,15 +50,23 @@ export function createCacheBackend(settings: Settings): CacheBackend {
 @Injectable()
 export class CacheRegistry {
   private readonly caches = new Map<string, VersionedCache>();
+  /** Shared by every `durable` namespace when Redis is absent. */
+  private fallback?: InProcessTtlBackend;
 
   constructor(@Inject(CACHE_BACKEND) private readonly backend: CacheBackend) {}
 
-  namespace(spec: { name: string; ttl: number }): VersionedCache {
+  namespace(spec: CacheNamespace): VersionedCache {
     const existing = this.caches.get(spec.name);
     if (existing) return existing;
-    const cache = new VersionedCache(spec.name, this.backend, spec.ttl);
+    const cache = new VersionedCache(spec.name, this.backendFor(spec), spec.ttl);
     this.caches.set(spec.name, cache);
     return cache;
+  }
+
+  private backendFor(spec: CacheNamespace): CacheBackend {
+    if (this.backend.configured || !spec.durable) return this.backend;
+    this.fallback ??= new InProcessTtlBackend();
+    return this.fallback;
   }
 
   get configured(): boolean {
